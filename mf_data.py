@@ -47,26 +47,23 @@ def search_funds(query: str, limit: int = 20) -> List[Dict]:
     schemes = _get_all_schemes()
     if not schemes:
         return []
-    
+
     query_lower = query.lower().strip()
     results = []
-    
+
     for s in schemes:
         name = s.get("schemeName", "")
         name_lower = name.lower()
-        
-        # Score: all words present = best match
+
         query_words = query_lower.split()
         matches = sum(1 for w in query_words if w in name_lower)
-        
+
         if matches == len(query_words):
-            # Prefer Direct + Growth
             score = matches
             if "direct" in name_lower:
                 score += 2
             if "growth" in name_lower:
                 score += 2
-            # Penalize regular plan slightly
             if "regular" in name_lower:
                 score -= 1
             results.append({
@@ -74,17 +71,13 @@ def search_funds(query: str, limit: int = 20) -> List[Dict]:
                 "scheme_name": name,
                 "score": score,
             })
-    
-    # Sort by score descending, then by name
+
     results.sort(key=lambda x: (-x["score"], x["scheme_name"]))
     return results[:limit]
 
 
 def get_fund_nav(scheme_code: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Get latest NAV for a fund.
-    Returns (nav_value, nav_date) or (None, None) on failure.
-    """
+    """Get latest NAV for a fund."""
     try:
         resp = requests.get(f"{MFAPI_BASE}/{scheme_code}", timeout=15)
         resp.raise_for_status()
@@ -112,70 +105,186 @@ def get_fund_meta(scheme_code: str) -> Dict:
 # Holdings scraping from Groww
 # ---------------------------------------------------------------------------
 
-def _slugify_groww(scheme_name: str) -> str:
+def _clean_scheme_name_for_groww(scheme_name: str) -> str:
     """
-    Convert a scheme name to Groww's URL slug.
-    e.g. "ICICI Prudential Flexicap Fund Direct Growth" ->
-         "icici-prudential-flexicap-fund-direct-growth"
+    Clean an AMFI scheme name to match Groww's naming convention.
+    AMFI: 'ICICI Prudential Flexicap Fund - Direct Plan - Growth'
+    Groww URL: 'icici-prudential-flexicap-fund-direct-growth'
     """
-    # Remove common suffixes that Groww doesn't include in URL
     name = scheme_name
-    # Remove " - " patterns
-    name = name.replace(" - ", " ")
-    # Lowercase and slugify
+    name = name.replace(" - ", " ").replace("-", " ")
+    name = re.sub(r'\bplan\b', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\bscheme\b', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\s+', ' ', name).strip()
+    return name
+
+
+def _slugify(name: str) -> str:
+    """Convert a name to a URL slug."""
     slug = re.sub(r'[^a-z0-9\s-]', '', name.lower())
     slug = re.sub(r'\s+', '-', slug.strip())
     slug = re.sub(r'-+', '-', slug)
     return slug
 
 
+def _generate_groww_slug_variants(scheme_name: str) -> List[str]:
+    """Generate multiple possible Groww URL slugs from a scheme name."""
+    variants = []
+    cleaned = _clean_scheme_name_for_groww(scheme_name)
+    slug = _slugify(cleaned)
+    if slug:
+        variants.append(slug)
+
+    no_fund = re.sub(r'\bfund\b', '', cleaned, flags=re.IGNORECASE)
+    slug_no_fund = _slugify(no_fund)
+    if slug_no_fund and slug_no_fund not in variants:
+        variants.append(slug_no_fund)
+
+    raw_slug = _slugify(scheme_name.replace(" - ", " "))
+    if raw_slug and raw_slug not in variants:
+        variants.append(raw_slug)
+
+    parts = cleaned.lower().split()
+    no_plan_type = [p for p in parts if p not in ("direct", "regular", "growth", "dividend", "plan", "scheme", "option")]
+    if no_plan_type:
+        slug_generic = _slugify(" ".join(no_plan_type))
+        if slug_generic and slug_generic not in variants:
+            variants.append(slug_generic)
+
+    if "flexi" in cleaned.lower():
+        for v in list(variants):
+            if "flexi-cap" in v:
+                alt = v.replace("flexi-cap", "flexicap")
+                if alt not in variants:
+                    variants.append(alt)
+            if "flexi" in v and "cap" in v and "flexicap" not in v and "flexi-cap" not in v:
+                alt = v.replace("flexi", "flexicap").replace("-cap", "")
+                if alt not in variants:
+                    variants.append(alt)
+
+    return variants
+
+
 def fetch_holdings_groww(scheme_name: str) -> Optional[List[Dict]]:
     """
     Fetch holdings from Groww by scheme name.
-    Returns list of {name, sector, instrument, weight} or None on failure.
+    Tries multiple URL slug variations to handle name mismatches.
     """
-    slug = _slugify_groww(scheme_name)
-    url = f"https://groww.in/mutual-funds/{slug}"
-    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml",
         "Accept-Language": "en-US,en;q=0.9",
     }
-    
+
+    slug_variants = _generate_groww_slug_variants(scheme_name)
+
+    for slug in slug_variants:
+        url = f"https://groww.in/mutual-funds/{slug}"
+        try:
+            resp = requests.get(url, headers=headers, timeout=20)
+            if resp.status_code != 200:
+                continue
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            holdings = _parse_groww_holdings(soup)
+            if holdings:
+                return holdings
+
+            holdings = _parse_groww_json_data(soup)
+            if holdings:
+                return holdings
+        except Exception:
+            continue
+
+    holdings = _groww_search_and_fetch(scheme_name)
+    if holdings:
+        return holdings
+
+    return None
+
+
+def _groww_search_and_fetch(scheme_name: str) -> Optional[List[Dict]]:
+    """Use Groww's search API to find the correct fund URL, then fetch holdings."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    try:
+        search_query = _clean_scheme_name_for_groww(scheme_name)
+        search_words = search_query.lower().split()
+        search_words = [w for w in search_words if w not in ("direct", "regular", "growth", "dividend", "plan", "scheme")]
+        search_query = " ".join(search_words)
+
+        resp = requests.get(
+            "https://groww.in/v1/api/search/v1/derivedentity",
+            params={"query": search_query, "q": search_query, "types": "MF"},
+            headers=headers,
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            funds = []
+            if isinstance(data, dict):
+                for key in ("results", "data", "derived_entities"):
+                    if key in data and isinstance(data[key], list):
+                        funds = data[key]
+                        break
+            elif isinstance(data, list):
+                funds = data
+
+            for fund in funds:
+                fund_url = fund.get("url") or fund.get("link") or fund.get("canonical_url")
+                if fund_url:
+                    if not fund_url.startswith("http"):
+                        fund_url = f"https://groww.in{fund_url}"
+                    holdings = _fetch_groww_url(fund_url)
+                    if holdings:
+                        return holdings
+    except Exception:
+        pass
+
+    return None
+
+
+def _fetch_groww_url(url: str) -> Optional[List[Dict]]:
+    """Fetch and parse holdings from a specific Groww URL."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
     try:
         resp = requests.get(url, headers=headers, timeout=20)
         if resp.status_code != 200:
             return None
-        
         soup = BeautifulSoup(resp.text, "html.parser")
         holdings = _parse_groww_holdings(soup)
-        
         if holdings:
             return holdings
-        return None
+        holdings = _parse_groww_json_data(soup)
+        if holdings:
+            return holdings
     except Exception:
-        return None
+        pass
+    return None
 
 
 def _parse_groww_holdings(soup: BeautifulSoup) -> List[Dict]:
     """Parse Groww holdings from the page HTML."""
     holdings = []
-    
-    # Groww renders holdings in a table with columns: Name | Sector | Instruments | Assets
-    # Try to find the holdings section
     tables = soup.find_all("table")
-    
+
     for table in tables:
         rows = table.find_all("tr")
         if len(rows) < 2:
             continue
-        
-        # Check if this looks like a holdings table
+
         header_cells = [th.get_text(strip=True).lower() for th in rows[0].find_all(["th", "td"])]
         header_text = " ".join(header_cells)
-        
-        if "name" in header_text and "asset" in header_text:
+
+        if "name" in header_text and ("asset" in header_text or "holding" in header_text or "weight" in header_text):
             for row in rows[1:]:
                 cells = row.find_all("td")
                 if len(cells) >= 4:
@@ -183,8 +292,6 @@ def _parse_groww_holdings(soup: BeautifulSoup) -> List[Dict]:
                     sector = cells[1].get_text(strip=True)
                     instrument = cells[2].get_text(strip=True)
                     assets_str = cells[3].get_text(strip=True)
-                    
-                    # Parse percentage
                     weight = _parse_percentage(assets_str)
                     if name and weight is not None:
                         holdings.append({
@@ -193,43 +300,121 @@ def _parse_groww_holdings(soup: BeautifulSoup) -> List[Dict]:
                             "instrument": instrument,
                             "weight": weight,
                         })
-    
+                elif len(cells) >= 2:
+                    name = cells[0].get_text(strip=True)
+                    assets_str = cells[-1].get_text(strip=True)
+                    weight = _parse_percentage(assets_str)
+                    if name and weight is not None:
+                        holdings.append({
+                            "name": name,
+                            "sector": "N/A",
+                            "instrument": "Equity",
+                            "weight": weight,
+                        })
+
     return holdings
 
 
-def _parse_percentage(s: str) -> Optional[float]:
+def _parse_groww_json_data(soup: BeautifulSoup) -> List[Dict]:
+    """Try to extract holdings from JSON data embedded in Groww's page."""
+    holdings = []
+
+    for script in soup.find_all("script"):
+        text = script.string or script.get_text()
+        if not text:
+            continue
+        if "holding" not in text.lower() and "stock" not in text.lower():
+            continue
+
+        try:
+            for pattern in [
+                r'window\.__INITIAL_STATE__\s*=\s*({.*?});\s*</script>',
+                r'window\.__NUXT__\s*=\s*({.*?});\s*</script>',
+                r'"holdings"\s*:\s*(\[.*?\])',
+                r'"stocks"\s*:\s*(\[.*?\])',
+            ]:
+                match = re.search(pattern, text, re.DOTALL)
+                if match:
+                    json_str = match.group(1)
+                    data = json.loads(json_str)
+                    found = _extract_holdings_from_json(data)
+                    if found:
+                        return found
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+    return holdings
+
+
+def _extract_holdings_from_json(data, depth=0) -> List[Dict]:
+    """Recursively search JSON data for holdings-like arrays."""
+    if depth > 5:
+        return []
+
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key.lower() in ("holdings", "stocks", "topHoldings", "portfolio"):
+                if isinstance(value, list):
+                    parsed = _parse_holdings_array(value)
+                    if parsed:
+                        return parsed
+            result = _extract_holdings_from_json(value, depth + 1)
+            if result:
+                return result
+    elif isinstance(data, list):
+        for item in data:
+            result = _extract_holdings_from_json(item, depth + 1)
+            if result:
+                return result
+
+    return []
+
+
+def _parse_holdings_array(arr: list) -> List[Dict]:
+    """Parse a holdings array from Groww's JSON format."""
+    holdings = []
+    for item in arr:
+        if not isinstance(item, dict):
+            continue
+
+        name = (
+            item.get("name")
+            or item.get("stockName")
+            or item.get("company")
+            or item.get("securityName")
+            or item.get("holdingName")
+        )
+        sector = item.get("sector") or item.get("industry") or "N/A"
+        instrument = item.get("instrument") or item.get("type") or "Equity"
+        weight = (
+            item.get("assets")
+            or item.get("weight")
+            or item.get("percentage")
+            or item.get("assetPercentage")
+        )
+
+        if name and weight is not None:
+            if isinstance(weight, str):
+                weight = _parse_percentage(weight)
+            if weight is not None:
+                holdings.append({
+                    "name": name,
+                    "sector": str(sector),
+                    "instrument": str(instrument),
+                    "weight": float(weight),
+                })
+
+    return holdings if len(holdings) >= 3 else []
+
+
+def _parse_percentage(s) -> Optional[float]:
     """Parse a percentage string like '9.29%' -> 9.29"""
-    s = s.strip().replace("%", "").replace(",", "")
+    if isinstance(s, (int, float)):
+        return float(s)
+    s = str(s).strip().replace("%", "").replace(",", "")
     try:
         return float(s)
     except ValueError:
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Holdings from MoneyControl (fallback)
-# ---------------------------------------------------------------------------
-
-def fetch_holdings_moneycontrol(scheme_name: str) -> Optional[List[Dict]]:
-    """
-    Fallback: fetch holdings from MoneyControl.
-    MoneyControl uses scheme-specific URLs, so this requires a lookup.
-    """
-    # MoneyControl needs a specific MRF code in the URL
-    # For now, try searching for the fund on MoneyControl
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html",
-    }
-    
-    try:
-        # Search for the fund on MoneyControl
-        search_url = "https://www.moneycontrol.com/mutual-funds/fund-ranking"
-        # This is a simplified approach — MoneyControl's search is more complex
-        # In practice, we'd need to map scheme names to MRF codes
-        # For now, return None and let the caller try other sources
-        return None
-    except Exception:
         return None
 
 
@@ -241,17 +426,9 @@ def fetch_holdings(scheme_name: str, scheme_code: str = None) -> Tuple[Optional[
     """
     Fetch holdings for a fund, trying multiple sources.
     Returns (holdings_list, source_name) or (None, error_message).
-    
-    Each holding is: {name, sector, instrument, weight}
     """
-    # Try Groww first (best data quality)
     holdings = fetch_holdings_groww(scheme_name)
     if holdings and len(holdings) > 0:
         return holdings, "Groww"
-    
-    # Try MoneyControl as fallback
-    holdings = fetch_holdings_moneycontrol(scheme_name)
-    if holdings and len(holdings) > 0:
-        return holdings, "MoneyControl"
-    
-    return None, "Unable to fetch holdings from any source. The fund may be too new or the name may not match."
+
+    return None, "Unable to fetch holdings. The scheme name from AMFI may not match Groww's URL format. Try searching with a simpler name (e.g. 'ICICI Prudential FlexiCap' instead of the full AMFI name)."
