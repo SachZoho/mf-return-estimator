@@ -7,7 +7,7 @@ How it works:
 2. App fetches the fund's portfolio holdings (from FinAPI/mfdata.in/Groww)
 3. Resolves each stock to an NSE ticker
 4. Fetches current-day price changes via Yahoo Finance
-5. Computes weighted return = sum(holding_weight × stock_change_pct)
+5. Computes weighted return = sum(holding_weight * stock_change_pct)
 
 Run: streamlit run app.py
 """
@@ -39,9 +39,9 @@ st.markdown('<div class="sub-header">Estimate today\'s mutual fund return from u
 
 st.markdown("""
 <div class="info-banner">
-    🔍 <b>How it works:</b> Enter a fund name → App fetches its holdings → Resolves each stock to an NSE ticker → 
+    🔍 <b>How it works:</b> Enter a fund name → App fetches its holdings → Resolves each stock to an NSE ticker →
     Fetches today's price changes → Computes the weighted estimated return.
-    <br>⚠️ This is an <b>estimate</b> based on the latest disclosed holdings (monthly). Actual MF NAV may differ due to 
+    <br>⚠️ This is an <b>estimate</b> based on the latest disclosed holdings (monthly). Actual MF NAV may differ due to
     cash positions, recent trades, and debt holdings.
 </div>
 """, unsafe_allow_html=True)
@@ -298,7 +298,153 @@ if st.session_state.selected_fund:
                     st.markdown("#### 📊 Detailed Breakdown")
                     st.dataframe(results_df, use_container_width=True, hide_index=True, column_config={"Weight (%)": st.column_config.NumberColumn(format="%.2f%%"), "Change (%)": st.column_config.NumberColumn(format="%.2f%%"), "Contribution": st.column_config.NumberColumn(format="%.4f%%")})
                     top15 = results_df.head(15)
-                    fig_water = go.Figure(go.Waterfall(x=top15["Company"], y=top15["Contribution"], orientation="v", connector={"line": {"color": "#ccc"}}, increasing={"marker": {"color": "#10b981"}}, decreasing={"marker": {"color": "#ef4444"}}))
+                    fig_water = go.Figure(go.Waterfall(x=top15["Company"], y=top15["Contribution"], orientation="v", connector={"line": {"color": "#ccc"}}, increasing={"marker": {"color": "#10b981"}}, decreasing={"marker": {"color": "#ef4444"}}}))
                     fig_water.update_layout(title="Contribution Waterfall (Top 15 by Impact)", yaxis_title="Contribution (%)", height=400, margin=dict(l=20, r=20, t=40, b=80))
                     fig_water.update_xaxes(tickangle=45)
                     st.plotly_chart(fig_water, use_container_width=True)
+
+    if not st.session_state.search_results:
+        st.markdown("""
+        ### 👆 Get Started
+
+        Type a fund name in the search box above, or click one of the suggestion buttons.
+
+        ---
+
+        ### 📐 How the return is calculated
+
+        The estimated return is computed as:
+
+        **Estimated Return = Σ (Holding Weight × Stock's Daily Change %)**
+
+        For example, if TVS Motor (9.29% weight) is down -0.81% today, its contribution to the fund's return is:
+
+        `9.29% × (-0.81%) = -0.0752%`
+
+        Summing all such contributions gives the estimated fund return for the day.
+
+        ### ⚠️ Limitations
+
+        - Holdings are disclosed **monthly** by AMCs. The fund may have traded since the last disclosure.
+        - **Debt, cash, and repo holdings** are excluded from the calculation (only equity is used).
+        - Some stocks (especially recently listed ones) may not be in the ticker database.
+        - This is an **estimate**, not the actual NAV return. Use it as a directional indicator.
+        """)
+
+st.divider()
+
+# ---------------------------------------------------------------------------
+# Alert Setup — email notification for negative returns
+# ---------------------------------------------------------------------------
+
+st.markdown("### 🔔 Set Up Negative Return Alert")
+
+st.markdown("""
+Get an email alert every 5 minutes when your tracked fund's estimated return goes negative.
+No login needed — just enter your email and pick a fund.
+""")
+
+alert_col1, alert_col2 = st.columns([3, 2])
+
+with alert_col1:
+    alert_email = st.text_input(
+        "📧 Your email address",
+        placeholder="you@example.com",
+        key="alert_email_input",
+    )
+
+with alert_col2:
+    fund_choices = []
+    if st.session_state.search_results:
+        for r in st.session_state.search_results:
+            fund_choices.append((r["scheme_name"], r["scheme_code"]))
+    elif st.session_state.selected_fund:
+        fund_choices.append((
+            st.session_state.selected_fund["name"],
+            st.session_state.selected_fund["code"],
+        ))
+
+    if fund_choices:
+        selected_idx = st.selectbox(
+            "📊 Fund to track",
+            range(len(fund_choices)),
+            format_func=lambda i: fund_choices[i][0][:60],
+            key="alert_fund_select",
+        )
+        alert_fund_name, alert_fund_code = fund_choices[selected_idx]
+    else:
+        st.markdown("*Search and select a fund first, then come back here to set up an alert.*")
+        alert_fund_name, alert_fund_code = None, None
+
+st.markdown("---")
+st.markdown("#### 🔑 GitHub Configuration (for saving alerts)")
+st.caption("""
+Alerts are stored in a CSV file in your GitHub repo. To save alerts from this app,
+you need a GitHub Personal Access Token with 'repo' scope.
+Create one at: https://github.com/settings/tokens/new?scopes=repo
+""")
+
+gh_col1, gh_col2, gh_col3 = st.columns(3)
+with gh_col1:
+    gh_token = st.text_input("GitHub Token", type="password", placeholder="ghp_...", key="gh_token_input")
+with gh_col2:
+    gh_owner = st.text_input("Repo Owner", value="SachZoho", key="gh_owner_input")
+with gh_col3:
+    gh_repo = st.text_input("Repo Name", value="mf-return-estimator", key="gh_repo_input")
+
+if st.button("🔔 Set Up Alert", type="primary", disabled=(not alert_email or not alert_fund_code or not gh_token)):
+    with st.spinner("Saving alert to GitHub..."):
+        from alerts import save_alert_github
+        success, msg = save_alert_github(
+            gh_token, gh_owner, gh_repo, alert_email, alert_fund_code, alert_fund_name
+        )
+    if success:
+        st.success(f"✅ {msg} You'll receive an email at **{alert_email}** whenever **{alert_fund_name[:50]}** has a negative estimated return.")
+        st.info("""
+        **What happens next:**
+        - A GitHub Actions job runs every 5 minutes, checking your fund's estimated return.
+        - If the return is negative, you'll get an email alert.
+        - If the return is positive, no email is sent.
+        - Make sure you've set up the GitHub repo secrets: `SENDER_EMAIL` and `SENDER_PASSWORD`.
+        """)
+    else:
+        st.error(f"❌ {msg}")
+
+if gh_token:
+    st.markdown("---")
+    st.markdown("#### 📋 Your Existing Alerts")
+    if st.button("🔄 Refresh alerts list"):
+        st.rerun()
+    try:
+        from alerts import read_alerts_github
+        existing_alerts, _ = read_alerts_github(gh_token, gh_owner, gh_repo)
+        if existing_alerts:
+            alerts_df = pd.DataFrame(existing_alerts)
+            st.dataframe(alerts_df, use_container_width=True, hide_index=True)
+
+            st.markdown("**Remove an alert:**")
+            remove_idx = st.selectbox(
+                "Select alert to remove",
+                range(len(existing_alerts)),
+                format_func=lambda i: f"{existing_alerts[i].get('email', '')} -> {existing_alerts[i].get('scheme_name', '')[:40]}",
+                key="remove_alert_select",
+            )
+            if st.button("🗑️ Remove Selected Alert"):
+                from alerts import remove_alert_github
+                sel = existing_alerts[remove_idx]
+                success, msg = remove_alert_github(
+                    gh_token, gh_owner, gh_repo,
+                    sel.get("email", ""), sel.get("scheme_code", "")
+                )
+                if success:
+                    st.success(f"✅ {msg}")
+                    st.rerun()
+                else:
+                    st.error(f"❌ {msg}")
+        else:
+            st.info("No alerts configured yet.")
+    except Exception as e:
+        st.warning(f"Could not read alerts: {str(e)[:80]}")
+
+st.divider()
+st.caption("📊 MF Return Estimator | Data: mfapi.in, FinAPI, Yahoo Finance | Alerts via GitHub Actions + Gmail | Built with Streamlit")
