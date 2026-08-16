@@ -1,447 +1,237 @@
 """
 Stock data module — resolves Indian stock names to NSE tickers
 and fetches current-day price changes via yfinance.
+
+Uses NSE's official EQUITY_L.csv (2,400+ companies) for comprehensive
+ticker resolution with fuzzy matching, instead of a hardcoded dictionary.
 """
 
 import re
 import time
+import csv
+import io
+import requests
 import yfinance as yf
 import pandas as pd
-import requests
 from typing import Dict, List, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from difflib import SequenceMatcher
 import warnings
 
 warnings.filterwarnings("ignore")
 
+
 # ---------------------------------------------------------------------------
-# NSE Ticker Dictionary
-# Maps common fund holding names to Yahoo Finance (.NS) tickers.
-# Covers ~250+ stocks that frequently appear in Indian MF portfolios.
+# NSE Company List — fetched once at startup, cached for the session
 # ---------------------------------------------------------------------------
 
-_TICKER_MAP_RAW = {
-    # Large caps - Banks & Financials
-    "icici bank": "ICICIBANK.NS",
-    "icici bank ltd": "ICICIBANK.NS",
-    "hdfc bank": "HDFCBANK.NS",
-    "hdfc bank ltd": "HDFCBANK.NS",
-    "state bank of india": "SBIN.NS",
-    "axis bank": "AXISBANK.NS",
-    "axis bank ltd": "AXISBANK.NS",
-    "kotak mahindra bank": "KOTAKBANK.NS",
-    "kotak mahindra bank ltd": "KOTAKBANK.NS",
-    "indusind bank": "INDUSINDBK.NS",
-    "yes bank": "YESBANK.NS",
-    "punjab national bank": "PNB.NS",
-    "bank of baroda": "BANKBARODA.NS",
-    "canara bank": "CANBK.NS",
-    "idbi bank": "IDBI.NS",
-    "federal bank": "FEDERALBNK.NS",
-    "rbl bank": "RBLBANK.NS",
-    "bandhan bank": "BANDHANBNK.NS",
-    "au small finance bank": "AUBANK.NS",
+_NSE_EQUITY_URL = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
 
-    # Financial services
-    "bajaj finance": "BAJFINANCE.NS",
-    "bajaj finserv": "BAJAJFINSV.NS",
-    "sbi life insurance": "SBILIFE.NS",
-    "sbi life insurance company ltd": "SBILIFE.NS",
-    "hdfc life insurance": "HDFCLIFE.NS",
-    "hdfc life insurance company": "HDFCLIFE.NS",
-    "icici prudential life insurance": "ICICIPRULI.NS",
-    "icici lombard": "ICICIGI.NS",
-    "icici lombard general insurance": "ICICIGI.NS",
-    "cholamandalam investment & finance": "CHOLAFIN.NS",
-    "cholamandalam investment and finance company ltd": "CHOLAFIN.NS",
-    "cholamandalam investment and finance": "CHOLAFIN.NS",
-    "shriram finance": "SHRIRAMFIN.NS",
-    "bajaj holdings & investment": "BAJAJHLDNG.NS",
-    "life insurance corporation of india": "LICI.NS",
-    "lic of india": "LICI.NS",
-    "max financial services": "MFSL.NS",
-    "max financial services ltd": "MFSL.NS",
-    "hdfc asset management": "HDFCAMC.NS",
-    "hdfc asset management company ltd": "HDFCAMC.NS",
-    "hdfc asset management company": "HDFCAMC.NS",
-    "prudent corporate advisory services": "PRUDENT.NS",
-    "prudent corporate advisory services ltd": "PRUDENT.NS",
-    "iifl wealth management": "IIFLWAM.NS",
-    "iifl wealth management ltd": "IIFLWAM.NS",
-    "360 one wam": "360ONE.NS",
-    "360 one wam ltd": "360ONE.NS",
-    "360 one wam ltd ordinary shares": "360ONE.NS",
-    "pb fintech": "POLICYBZR.NS",
-    "pb fintech ltd": "POLICYBZR.NS",
+_nse_companies: Optional[List[Dict]] = None
+_exact_map: Optional[Dict[str, str]] = None
 
-    # IT / Technology
-    "infosys": "INFY.NS",
-    "infosys ltd": "INFY.NS",
-    "tata consultancy services": "TCS.NS",
-    "tata consultancy services ltd": "TCS.NS",
-    "wipro": "WIPRO.NS",
-    "wipro ltd": "WIPRO.NS",
-    "hcl technologies": "HCLTECH.NS",
-    "hcl technologies ltd": "HCLTECH.NS",
-    "tech mahindra": "TECHM.NS",
-    "tech mahindra ltd": "TECHM.NS",
-    "ltimindtree": "LTIM.NS",
-    "lti mindtree": "LTIM.NS",
-    "mphasis": "MPHASIS.NS",
-    "mphasis ltd": "MPHASIS.NS",
-    "coforge": "COFORGE.NS",
-    "coforge ltd": "COFORGE.NS",
-    "persistent systems": "PERSISTENT.NS",
-    "bharti airtel": "BHARTIARTL.NS",
-    "bharti airtel ltd": "BHARTIARTL.NS",
-    "tata elxsi": "TATAELXSI.NS",
-    "netweb technologies": "NETWEB.NS",
-    "netweb technologies india": "NETWEB.NS",
-    "netweb technologies india ltd": "NETWEB.NS",
-    "sonata software": "SONATSOFTW.NS",
-    "ce info systems": "CEINFO.NS",
-    "ce info systems ltd": "CEINFO.NS",
-    "ce info systems (mapmyindia)": "CEINFO.NS",
-    "sagility": "SAGILITY.NS",
-    "sagility ltd": "SAGILITY.NS",
-    "tbo tek": "TBOTEK.NS",
-    "tbo tek ltd": "TBOTEK.NS",
 
-    # Automobile
-    "tvs motor company": "TVSMOTOR.NS",
-    "tvs motor company ltd": "TVSMOTOR.NS",
-    "maruti suzuki india": "MARUTI.NS",
-    "maruti suzuki india ltd": "MARUTI.NS",
-    "tata motors": "TATAMOTORS.NS",
-    "tata motors ltd": "TATAMOTORS.NS",
-    "mahindra & mahindra": "M&M.NS",
-    "mahindra and mahindra": "M&M.NS",
-    "mahindra & mahindra ltd": "M&M.NS",
-    "mahindra and mahindra ltd": "M&M.NS",
-    "eicher motors": "EICHERMOT.NS",
-    "eicher motors ltd": "EICHERMOT.NS",
-    "bajaj auto": "BAJAJ-AUTO.NS",
-    "hero motocorp": "HEROMOTOCO.NS",
-    "ashok leyland": "ASHOKLEY.NS",
-    "sundaram clayton": "SCLT.NS",
-    "sundaram-clayton": "SCLT.NS",
-    "sundaram - clayton dcd": "SCLT.NS",
-    "sundaram - clayton dcd ltd": "SCLT.NS",
-    "sharda motor industries": "SHARDAMOTR.NS",
-    "sharda motor industries ltd": "SHARDAMOTR.NS",
-    "sona blw precision": "SONACOMS.NS",
-    "sona blw precision forgings": "SONACOMS.NS",
-    "sona blw precision forgings ltd": "SONACOMS.NS",
-    "samvardhana motherson": "MOTHERSON.NS",
-    "samvardhana motherson international": "MOTHERSON.NS",
-    "samvardhana motherson international ltd": "MOTHERSON.NS",
-    "motherson sumi wiring": "MSUMI.NS",
-    "motherson sumi wiring india": "MSUMI.NS",
-    "motherson sumi wiring india ltd": "MSUMI.NS",
-    "tvs holdings": "TVSHOLDINGS.NS",
-    "tvs holdings ltd": "TVSHOLDINGS.NS",
-    "bosch": "BOSCHLTD.NS",
-    "bosch ltd": "BOSCHLTD.NS",
-    "endurance technologies": "ENDURANCE.NS",
-    "marico": "MARICO.NS",
-
-    # Consumer
-    "avenue supermarts": "DMART.NS",
-    "avenue supermarts ltd": "DMART.NS",
-    "trent": "TRENT.NS",
-    "trent ltd": "TRENT.NS",
-    "britannia industries": "BRITANNIA.NS",
-    "britannia industries ltd": "BRITANNIA.NS",
-    "hindustan unilever": "HINDUNILVR.NS",
-    "hindustan unilever ltd": "HINDUNILVR.NS",
-    "itc": "ITC.NS",
-    "itc ltd": "ITC.NS",
-    "nestle india": "NESTLEIND.NS",
-    "varun beverages": "VBL.NS",
-    "tata consumer products": "TATACONSUM.NS",
-    "godrej consumer products": "GODREJCP.NS",
-    "dabur india": "DABUR.NS",
-    "radico khaitan": "RADICO.NS",
-    "radico khaitan ltd": "RADICO.NS",
-    "united spirits": "UNITDSPR.NS",
-    "pearl global industries": "PGIL.NS",
-    "pearl global industries ltd": "PGIL.NS",
-    "safari industries": "SAFARI.NS",
-    "safari industries (india) ltd": "SAFARI.NS",
-    "safari industries (india)": "SAFARI.NS",
-    "sai silks": "KALAMANDIR.NS",
-    "sai silks (kalamandir) ltd": "KALAMANDIR.NS",
-    "sai silks (kalamandir)": "KALAMANDIR.NS",
-
-    # Consumer discretionary / Retail
-    "fsn e-commerce ventures": "NYKAA.NS",
-    "fsn e-commerce ventures ltd": "NYKAA.NS",
-    "fsn e-commerce ventures ltd (nykaa)": "NYKAA.NS",
-    "tata technologies": "TATATECH.NS",
-    "lg electronics india": "LGEL.NS",
-    "lg electronics india ltd": "LGEL.NS",
-    "international gemmological institute": "IGIL.NS",
-    "international gemmological institute (india) ltd": "IGIL.NS",
-    "ethos": "ETHOSLTD.NS",
-    "ethos ltd": "ETHOSLTD.NS",
-    "redtape": "REDTAPE.NS",
-    "redtape ltd": "REDTAPE.NS",
-    "lenskart solutions": "LENSKART.NS",
-    "lenskart solutions ltd": "LENSKART.NS",
-    "pvr inox": "PVRINOX.NS",
-    "pvr inox ltd": "PVRINOX.NS",
-    "chalet hotels": "CHALET.NS",
-    "chalet hotels ltd": "CHALET.NS",
-
-    # Industrials / Capital Goods
-    "larsen & toubro": "LT.NS",
-    "larsen & toubro ltd": "LT.NS",
-    "larsen and toubro": "LT.NS",
-    "larsen and toubro ltd": "LT.NS",
-    "siemens": "SIEMENS.NS",
-    "siemens ltd": "SIEMENS.NS",
-    "abb india": "ABB.NS",
-    "cummins india": "CUMMINSIND.NS",
-    "blue star": "BLUESTARCO.NS",
-    "blue star ltd": "BLUESTARCO.NS",
-    "pg electroplast": "PGEL.NS",
-    "pg electroplast ltd": "PGEL.NS",
-    "azad engineering": "AZAD.NS",
-    "azad engineering ltd": "AZAD.NS",
-    "omnitech engineering": "OMNITECH.NS",
-    "omnitech engineering ltd": "OMNITECH.NS",
-    "sedemac mechatronics": "SEDEMAC.NS",
-    "sedemac mechatronics ltd": "SEDEMAC.NS",
-    "kaynes technology": "KAYNES.NS",
-    "kaynes technology india": "KAYNES.NS",
-    "kaynes technology india ltd": "KAYNES.NS",
-    "crizac": "CRIZAC.NS",
-    "crizac ltd": "CRIZAC.NS",
-    "interglob aviation": "INDIGO.NS",
-    "interglob aviation ltd": "INDIGO.NS",
-    "interglobe aviation": "INDIGO.NS",
-    "interglobe aviation ltd": "INDIGO.NS",
-    "travel food services": "TFS.NS",
-    "travel food services ltd": "TFS.NS",
-    "shadowfax technologies": "SHADOWFAX.NS",
-    "shadowfax technologies ltd": "SHADOWFAX.NS",
-    "talwandi sabo power": "TSPL.NS",
-    "talwandi sabo power ltd": "TSPL.NS",
-    "vedanta power": "VEDL.NS",
-    "vedanta power ltd": "VEDL.NS",
-    "vedanta aluminium metal": "VEDL.NS",
-    "vedanta aluminium metal ltd": "VEDL.NS",
-    "vedanta oil and gas": "VEDL.NS",
-    "vedanta oil and gas ltd": "VEDL.NS",
-    "vedanta iron and steel": "VEDL.NS",
-    "vedanta iron and steel ltd": "VEDL.NS",
-    "vedanta": "VEDL.NS",
-    "vedanta ltd": "VEDL.NS",
-    "physicswallah": "PHYSICSWALLAH.NS",
-    "physicswallah ltd": "PHYSICSWALLAH.NS",
-
-    # Materials / Metals / Cement
-    "ultratech cement": "ULTRACEMCO.NS",
-    "ultratech cement ltd": "ULTRACEMCO.NS",
-    "shree cement": "SHREECEM.NS",
-    "grasim industries": "GRASIM.NS",
-    "ambuja cements": "AMBUJACEM.NS",
-    "tata steel": "TATASTEEL.NS",
-    "tata steel ltd": "TATASTEEL.NS",
-    "jsw steel": "JSWSTEEL.NS",
-    "jindal steel & power": "JINDALSTEL.NS",
-    "jindal steel and power": "JINDALSTEL.NS",
-    "jindal steel & power ltd": "JINDALSTEL.NS",
-    "jindal steel and power ltd": "JINDALSTEL.NS",
-    "jindal steel": "JINDALSTEL.NS",
-    "hindalco industries": "HINDALCO.NS",
-    "hindalco": "HINDALCO.NS",
-    "hindalco industries ltd": "HINDALCO.NS",
-    "vedanta aluminium": "VEDL.NS",
-    "hindustan zinc": "HINDZINC.NS",
-    "coal india": "COALINDIA.NS",
-    "national aluminium": "NATIONALUM.NS",
-    "ratnamani metals & tubes": "RATNAMANI.NS",
-    "ratnamani metals and tubes": "RATNAMANI.NS",
-    "ratnamani metals & tubes ltd": "RATNAMANI.NS",
-    "apar industries": "APARIND.NS",
-    "apar industries ltd": "APARIND.NS",
-    "pi industries": "PIIND.NS",
-    "pi industries ltd": "PIIND.NS",
-    "upl": "UPL.NS",
-    "upl ltd": "UPL.NS",
-    "srf": "SRF.NS",
-    "srf ltd": "SRF.NS",
-    "century plyboards": "CENTURYPLY.NS",
-    "century plyboards (india) ltd": "CENTURYPLY.NS",
-    "century plyboards (india)": "CENTURYPLY.NS",
-    "greenpanel industries": "GREENPANEL.NS",
-    "greenpanel industries ltd": "GREENPANEL.NS",
-
-    # Healthcare
-    "sun pharmaceutical": "SUNPHARMA.NS",
-    "sun pharmaceutical industries": "SUNPHARMA.NS",
-    "sun pharmaceutical industries ltd": "SUNPHARMA.NS",
-    "sun pharma": "SUNPHARMA.NS",
-    "dr reddy's laboratories": "DRREDDY.NS",
-    "dr reddys laboratories": "DRREDDY.NS",
-    "cipla": "CIPLA.NS",
-    "cipla ltd": "CIPLA.NS",
-    "divi's laboratories": "DIVISLAB.NS",
-    "divis laboratories": "DIVISLAB.NS",
-    "apollo hospitals": "APOLLOHOSP.NS",
-    "apollo hospitals enterprise": "APOLLOHOSP.NS",
-    "max healthcare": "MAXHEALTH.NS",
-    "max healthcare institute": "MAXHEALTH.NS",
-    "neuland laboratories": "NEULANDLAB.NS",
-    "neuland laboratories ltd": "NEULANDLAB.NS",
-    "vijaya diagnostic centre": "VIJAYA.NS",
-    "vijaya diagnostic centre ltd": "VIJAYA.NS",
-    "syngene international": "SYNGENE.NS",
-    "syngene international ltd": "SYNGENE.NS",
-    "lal pathlabs": "LALPATHLAB.NS",
-
-    # Energy / Oil & Gas
-    "reliance industries": "RELIANCE.NS",
-    "reliance industries ltd": "RELIANCE.NS",
-    "oil & natural gas corporation": "ONGC.NS",
-    "oil and natural gas corporation": "ONGC.NS",
-    "indian oil corporation": "IOC.NS",
-    "bharat petroleum": "BPCL.NS",
-    "hindustan petroleum": "HINDPETRO.NS",
-    "gail india": "GAIL.NS",
-    "ntpc": "NTPC.NS",
-    "power grid corporation": "POWERGRID.NS",
-    "tata power": "TATAPOWER.NS",
-    "adani green energy": "ADANIGREEN.NS",
-    "adani power": "ADANIPOWER.NS",
-    "adani enterprises": "ADANIENT.NS",
-
-    # Telecom / Media
-    "idea cellular": "IDEA.NS",
-    "vodafone idea": "IDEA.NS",
-    "zee entertainment": "ZEEL.NS",
-    "sun tv network": "SUNTV.NS",
-    "network18 media": "NETWORK18.NS",
-    "tips music": "TIPSMUSIC.NS",
-    "sony pictures networks": "SONYPICS.NS",
-
-    # Construction / Real Estate
-    "dlf": "DLF.NS",
-    "godrej properties": "GODREJPROP.NS",
-    "oberoi realty": "OBEROIRLTY.NS",
-    "prestige estates": "PRESTIGE.NS",
-    "phoenix mills": "PHOENIXLTD.NS",
-    "mahanagar gas": "MGL.NS",
-    "indraprastha gas": "IGL.NS",
-    "gujarat gas": "GUJGASLTD.NS",
-
-    # Chemicals / Fertilizers
-    "coromandel international": "COROMANDEL.NS",
-    "chambal fertilisers": "CHAMBLFERT.NS",
-    "deepak nitrite": "DEEPAKNTR.NS",
-    "aarti industries": "AARTIIND.NS",
-    "tata chemicals": "TATACHEM.NS",
-    "pidilite industries": "PIDILITIND.NS",
-    "asian paints": "ASIANPAINT.NS",
-    "berger paints": "BERGEPAINT.NS",
-
-    # Retail / E-commerce / New age
-    "zomato": "ETERNAL.NS",
-    "zomato ltd": "ETERNAL.NS",
-    "eternal": "ETERNAL.NS",
-    "eternal ltd": "ETERNAL.NS",
-    "paytm": "PAYTM.NS",
-    "one 97 communications": "PAYTM.NS",
-    "delhivery": "DELHIVERY.NS",
-    "cartrade tech": "CARTRADE.NS",
-    "indiamart intermesh": "INDIAMART.NS",
-    "nykaa": "NYKAA.NS",
-    "fsn e-commerce": "NYKAA.NS",
-
-    # Real estate / Infra
-    "irb infrastructure developers": "IRB.NS",
-    "engineers india": "ENGINERSIN.NS",
-    "rites": "RITES.NS",
-    "rail vikas nigam": "RVNL.NS",
-    "irfc": "IRFC.NS",
-    "ircon international": "IRCON.NS",
-    "hudco": "HUDCO.NS",
-    "rec": "RECLTD.NS",
-    "power finance corporation": "PFC.NS",
-    "muthoot finance": "MUTHOOTFIN.NS",
-
-    # Misc
-    "rolex rings": "ROLEXRINGS.NS",
-    "rolex rings ltd": "ROLEXRINGS.NS",
-    "aditya birla fashion": "ABFRL.NS",
-    "titan company": "TITAN.NS",
-    "titan": "TITAN.NS",
-    "titan company ltd": "TITAN.NS",
-
-    # Telecom equipment
-    "itd cementation india": "ITDCEM.NS",
-    "tejas networks": "TEJAS.NS",
-
-    # Diversified
-    "tata investment corporation": "TATAINVEST.NS",
-    "aditya birla sun life amc": "ABSLAMC.NS",
-    "shriram asset management": "SHRIRAMAMC.NS",
-    "utiamc": "UTIAMC.NS",
-    "aditya birla real estate": "ABREL.NS",
-
-    # New IPOs / Recent additions
-    "brainbees solutions": "FIRSTCRY.NS",
-    "firstcry": "FIRSTCRY.NS",
-    "smartworks": "SMARTWORKS.NS",
-
-    # Autos / 2W / CV
-    "bajaj auto ltd": "BAJAJ-AUTO.NS",
-    "force motors": "FORCEMOTORS.NS",
-    "maruti suzuki": "MARUTI.NS",
-    "maruti": "MARUTI.NS",
-    "tata technologies ltd": "TATATECH.NS",
-    "ashok leyland ltd": "ASHOKLEY.NS",
+# Common aliases that don't match NSE's exact naming
+_ALIAS_MAP = {
+    "icici bank": "ICICIBANK", "hdfc bank": "HDFCBANK", "state bank of india": "SBIN",
+    "axis bank": "AXISBANK", "tvs motor company": "TVSMOTOR",
+    "maruti suzuki india": "MARUTI", "maruti suzuki": "MARUTI",
+    "avenue supermarts": "DMART", "larsen & toubro": "LT", "larsen and toubro": "LT",
+    "mahindra & mahindra": "M&M", "mahindra and mahindra": "M&M",
+    "tata consultancy services": "TCS", "bharat petroleum": "BPCL",
+    "hindustan petroleum": "HINDPETRO", "oil & natural gas corporation": "ONGC",
+    "oil and natural gas corporation": "ONGC", "zomato": "ETERNAL", "eternal": "ETERNAL",
+    "divi's laboratories": "DIVISLAB", "divis laboratories": "DIVISLAB",
+    "dr reddy's laboratories": "DRREDDY", "dr reddys laboratories": "DRREDDY",
+    "m&m": "M&M", "bajaj-auto": "BAJAJ-AUTO", "bajaj auto": "BAJAJ-AUTO",
+    "sona blw precision": "SONACOMS", "sona blw precision forgings": "SONACOMS",
+    "sundaram-clayton": "SCLT", "sundaram clayton": "SCLT",
+    "sundaram - clayton dcd": "SCLT", "samvardhana motherson": "MOTHERSON",
+    "samvardhana motherson international": "MOTHERSON", "motherson sumi wiring": "MSUMI",
+    "fsn e-commerce ventures": "NYKAA", "fsn e-commerce": "NYKAA", "nykaa": "NYKAA",
+    "interglobe aviation": "INDIGO", "interglob aviation": "INDIGO",
+    "jindal steel & power": "JINDALSTEL", "jindal steel and power": "JINDALSTEL",
+    "ratnamani metals & tubes": "RATNAMANI", "ratnamani metals and tubes": "RATNAMANI",
+    "ge t&d india": "GET&D", "multi commodity exchange of india": "MCEVENT",
+    "multi commodity exchange": "MCEVENT", "the federal bank": "FEDERALBNK",
+    "federal bank": "FEDERALBNK", "punjab national bank": "PNB",
+    "bank of baroda": "BANKBARODA", "canara bank": "CANBK", "idbi bank": "IDBI",
+    "rbl bank": "RBLBANK", "bandhan bank": "BANDHANBNK",
+    "au small finance bank": "AUBANK", "indusind bank": "INDUSINDBK",
+    "yes bank": "YESBANK", "kotak mahindra bank": "KOTAKBANK",
+    "tata steel": "TATASTEEL", "tata motors": "TATAMOTORS", "tata power": "TATAPOWER",
+    "tata consumer products": "TATACONSUM", "tata chemicals": "TATACHEM",
+    "tata investment corporation": "TATAINVEST", "tata technologies": "TATATECH",
+    "tata elxsi": "TATAELXSI", "reliance industries": "RELIANCE",
+    "hindustan unilever": "HINDUNILVR", "hindustan zinc": "HINDZINC",
+    "coal india": "COALINDIA", "indian oil corporation": "IOC",
+    "gail india": "GAIL", "ntpc": "NTPC", "power grid corporation": "POWERGRID",
+    "adani green energy": "ADANIGREEN", "adani power": "ADANIPOWER",
+    "adani enterprises": "ADANIENT", "adani total gas": "ATGL",
+    "adani wilmar": "AWL", "varun beverages": "VBL",
+    "godrej consumer products": "GODREJCP", "godrej properties": "GODREJPROP",
+    "dabur india": "DABUR", "nestle india": "NESTLEIND", "itc": "ITC",
+    "wipro": "WIPRO", "infosys": "INFY", "tech mahindra": "TECHM",
+    "hcl technologies": "HCLTECH", "ltimindtree": "LTIM", "lti mindtree": "LTIM",
+    "mphasis": "MPHASIS", "coforge": "COFORGE",
+    "persistent systems": "PERSISTENT", "bharti airtel": "BHARTIARTL",
+    "sun pharmaceutical": "SUNPHARMA", "sun pharma": "SUNPHARMA",
+    "cipla": "CIPLA", "apollo hospitals": "APOLLOHOSP",
+    "max healthcare": "MAXHEALTH", "max financial services": "MFSL",
+    "sbi life insurance": "SBILIFE", "hdfc life insurance": "HDFCLIFE",
+    "hdfc asset management": "HDFCAMC",
+    "icici prudential life insurance": "ICICIPRULI",
+    "icici lombard": "ICICIGI",
+    "life insurance corporation of india": "LICI", "lic of india": "LICI",
+    "bajaj finance": "BAJFINANCE", "bajaj finserv": "BAJAJFINSV",
+    "bajaj holdings & investment": "BAJAJHLDNG",
+    "bajaj holdings and investment": "BAJAJHLDNG",
+    "shriram finance": "SHRIRAMFIN", "muthoot finance": "MUTHOOTFIN",
+    "cholamandalam investment & finance": "CHOLAFIN",
+    "cholamandalam investment and finance": "CHOLAFIN",
+    "pb fintech": "POLICYBZR", "360 one wam": "360ONE",
+    "iifl wealth management": "IIFLWAM",
+    "prudent corporate advisory services": "PRUDENT",
+    "ultratech cement": "ULTRACEMCO", "shree cement": "SHREECEM",
+    "grasim industries": "GRASIM", "ambuja cements": "AMBUJACEM",
+    "jsw steel": "JSWSTEEL", "hindalco industries": "HINDALCO",
+    "hindalco": "HINDALCO", "vedanta": "VEDL", "vedanta ltd": "VEDL",
+    "national aluminium": "NATIONALUM", "apar industries": "APARIND",
+    "pi industries": "PIIND", "upl": "UPL", "srf": "SRF",
+    "century plyboards": "CENTURYPLY", "greenpanel industries": "GREENPANEL",
+    "asian paints": "ASIANPAINT", "berger paints": "BERGEPAINT",
+    "pidilite industries": "PIDILITIND", "deepak nitrite": "DEEPAKNTR",
+    "aarti industries": "AARTIIND", "coromandel international": "COROMANDEL",
+    "dlf": "DLF", "oberoi realty": "OBEROIRLTY", "prestige estates": "PRESTIGE",
+    "phoenix mills": "PHOENIXLTD", "trent": "TRENT",
+    "britannia industries": "BRITANNIA", "radico khaitan": "RADICO",
+    "united spirits": "UNITDSPR", "eicher motors": "EICHERMOT",
+    "bajaj auto": "BAJAJ-AUTO", "hero motocorp": "HEROMOTOCO",
+    "ashok leyland": "ASHOKLEY", "bosch": "BOSCHLTD",
+    "endurance technologies": "ENDURANCE", "marico": "MARICO",
+    "titan company": "TITAN", "titan": "TITAN",
+    "blue star": "BLUESTARCO", "siemens": "SIEMENS", "abb india": "ABB",
+    "cummins india": "CUMMINSIND",
+    "irb infrastructure developers": "IRB", "rail vikas nigam": "RVNL",
+    "irfc": "IRFC", "ircon international": "IRCON", "hudco": "HUDCO",
+    "rec": "RECLTD", "power finance corporation": "PFC",
+    "engineers india": "ENGINERSIN", "rites": "RITES",
+    "idea cellular": "IDEA", "vodafone idea": "IDEA",
+    "zee entertainment": "ZEEL", "sun tv network": "SUNTV",
+    "tips music": "TIPSMUSIC", "pvr inox": "PVRINOX",
+    "chalet hotels": "CHALET", "indraprastha gas": "IGL",
+    "mahanagar gas": "MGL", "gujarat gas": "GUJGASLTD",
+    "itd cementation india": "ITDCEM", "tejas networks": "TEJAS",
+    "aditya birla fashion": "ABFRL", "aditya birla sun life amc": "ABSLAMC",
+    "aditya birla real estate": "ABREL", "utiamc": "UTIAMC",
+    "shriram asset management": "SHRIRAMAMC",
+    "brainbees solutions": "FIRSTCRY", "firstcry": "FIRSTCRY",
+    "smartworks": "SMARTWORKS", "force motors": "FORCEMOTORS",
+    "rolex rings": "ROLEXRINGS", "pearl global industries": "PGIL",
+    "safari industries": "SAFARI", "sai silks": "KALAMANDIR",
+    "ethos": "ETHOSLTD", "redtape": "REDTAPE",
+    "lenskart solutions": "LENSKART", "crizac": "CRIZAC",
+    "kaynes technology": "KAYNES", "azad engineering": "AZAD",
+    "pg electroplast": "PGEL", "shadowfax technologies": "SHADOWFAX",
+    "travel food services": "TFS", "neuland laboratories": "NEULANDLAB",
+    "vijaya diagnostic centre": "VIJAYA", "syngene international": "SYNGENE",
+    "netweb technologies": "NETWEB", "ce info systems": "CEINFO",
+    "sagility": "SAGILITY", "tbo tek": "TBOTEK",
+    "physicswallah": "PHYSICSWALLAH", "omnitech engineering": "OMNITECH",
+    "sedemac mechatronics": "SEDEMAC",
+    "sharda motor industries": "SHARDAMOTR", "tvs holdings": "TVSHOLDINGS",
+    "motherson sumi wiring india": "MSUMI",
+    "international gemmological institute": "IGIL",
+    "lg electronics india": "LGEL", "indiamart intermesh": "INDIAMART",
+    "cartrade tech": "CARTRADE", "delhivery": "DELHIVERY",
+    "paytm": "PAYTM", "one 97 communications": "PAYTM",
+    "sonata software": "SONATSOFTW", "aegon life": "AEGON",
+    "anglo eastern": "ANGLOEAST",
 }
 
 
 def _normalize(name: str) -> str:
     """Normalize a company name for lookup."""
     name = name.lower().strip()
-    for suffix in ["ltd.", "ltd", "limited", "co.", "co", "company", "corporation", "corp"]:
+    for suffix in ["ltd.", "ltd", "limited", "co.", "co", "company", "corporation", "corp", "pvt.", "pvt"]:
         name = name.replace(suffix, "")
     name = re.sub(r'[^\w\s&-]', '', name)
     name = re.sub(r'\s+', ' ', name).strip()
     return name
 
 
-_TICKER_MAP = {}
-for k, v in _TICKER_MAP_RAW.items():
-    _TICKER_MAP[_normalize(k)] = v
-    _TICKER_MAP[k] = v
+def _load_nse_companies():
+    """Fetch NSE's complete equity list and build lookup maps. Cached per session."""
+    global _nse_companies, _exact_map
+    if _nse_companies is not None and _exact_map is not None:
+        return
+
+    _nse_companies = []
+    _exact_map = {}
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/csv,application/csv",
+    }
+
+    try:
+        resp = requests.get(_NSE_EQUITY_URL, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            reader = csv.DictReader(io.StringIO(resp.text))
+            for row in reader:
+                symbol = row.get("SYMBOL", "").strip()
+                name = row.get("NAME OF COMPANY", "").strip()
+                if symbol and name:
+                    norm = _normalize(name)
+                    _nse_companies.append({"symbol": symbol, "name": name, "norm_name": norm})
+                    _exact_map[norm] = symbol
+                    if norm.startswith("the "):
+                        _exact_map[norm[4:]] = symbol
+    except Exception:
+        pass
 
 
 def resolve_ticker(company_name: str) -> Optional[str]:
     """
     Resolve an Indian company name to a Yahoo Finance (.NS) ticker.
+    Uses NSE's complete company list (2,400+) with fuzzy matching.
     Returns the ticker (e.g. 'TVSMOTOR.NS') or None if not found.
     """
     norm = _normalize(company_name)
-    if norm in _TICKER_MAP:
-        return _TICKER_MAP[norm]
+
+    # 1. Try alias map
+    if norm in _ALIAS_MAP:
+        return f"{_ALIAS_MAP[norm]}.NS"
 
     lower = company_name.lower().strip()
-    if lower in _TICKER_MAP:
-        return _TICKER_MAP[lower]
+    if lower in _ALIAS_MAP:
+        return f"{_ALIAS_MAP[lower]}.NS"
 
-    cleaned = re.sub(r'\b(ltd|limited|co|company|corporation|corp)\b\.?', '', lower)
-    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-    if cleaned in _TICKER_MAP:
-        return _TICKER_MAP[cleaned]
-    cleaned_norm = _normalize(cleaned)
-    if cleaned_norm in _TICKER_MAP:
-        return _TICKER_MAP[cleaned_norm]
+    # 2. Load NSE companies (cached after first call)
+    _load_nse_companies()
 
+    # 3. Try exact match against NSE company names
+    if norm in _exact_map:
+        return f"{_exact_map[norm]}.NS"
+
+    if norm.startswith("the "):
+        if norm[4:] in _exact_map:
+            return f"{_exact_map[norm[4:]]}.NS"
+
+    # 4. Fuzzy match against all NSE company names
+    if _nse_companies:
+        best_score = 0.0
+        best_symbol = None
+
+        for c in _nse_companies:
+            score = SequenceMatcher(None, norm, c["norm_name"]).ratio()
+            if score > best_score:
+                best_score = score
+                best_symbol = c["symbol"]
+
+        if best_score >= 0.72:
+            return f"{best_symbol}.NS"
+
+    # 5. Yahoo Finance search API as last resort
     ticker = _yahoo_search(company_name)
     if ticker:
         return ticker
@@ -468,12 +258,14 @@ def _yahoo_search(company_name: str) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Price Change Fetcher
+# ---------------------------------------------------------------------------
+
 def fetch_price_changes(tickers: List[str]) -> Dict[str, Dict]:
     """
     Fetch current-day price change for a list of tickers using yfinance.
     Returns dict: {ticker: {"prev_close": float, "curr_price": float, "change_pct": float}}
-
-    Strategy: batch download (fast), then retry missing individually (resilient).
     """
     if not tickers:
         return {}
@@ -502,10 +294,8 @@ def fetch_price_changes(tickers: List[str]) -> Dict[str, Dict]:
 def _fetch_batch(tickers: List[str]) -> Dict[str, Dict]:
     """Fetch price data for a batch of tickers via yf.download."""
     results = {}
-
     try:
         data = yf.download(tickers, period="5d", progress=False, group_by="ticker")
-
         if len(tickers) == 1:
             ticker = tickers[0]
             result = _extract_single(data, ticker)
@@ -523,7 +313,6 @@ def _fetch_batch(tickers: List[str]) -> Dict[str, Dict]:
                     pass
     except Exception:
         pass
-
     return results
 
 
@@ -532,24 +321,15 @@ def _extract_single(df, ticker: str) -> Optional[Dict]:
     try:
         if df is None or df.empty:
             return None
-
         close = df["Close"].dropna()
         if len(close) < 2:
             return None
-
         prev_close = float(close.iloc[-2])
         curr_price = float(close.iloc[-1])
-
         if prev_close == 0:
             return None
-
         change_pct = ((curr_price - prev_close) / prev_close) * 100
-
-        return {
-            "prev_close": prev_close,
-            "curr_price": curr_price,
-            "change_pct": change_pct,
-        }
+        return {"prev_close": prev_close, "curr_price": curr_price, "change_pct": change_pct}
     except Exception:
         return None
 
