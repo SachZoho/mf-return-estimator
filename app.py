@@ -14,7 +14,10 @@ Run: streamlit run app.py
 
 import streamlit as st
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 from datetime import datetime
+from collections import defaultdict
 
 from mf_data import search_funds, fetch_holdings, get_fund_nav, get_fund_meta
 from stock_data import resolve_ticker, fetch_price_changes
@@ -48,28 +51,6 @@ st.markdown("""
         font-size: 1rem;
         color: #666;
         margin-bottom: 1.5rem;
-    }
-    .metric-card {
-        background: white;
-        border-radius: 10px;
-        padding: 20px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-        text-align: center;
-    }
-    .positive {
-        color: #16a34a;
-        font-weight: 700;
-    }
-    .negative {
-        color: #dc2626;
-        font-weight: 700;
-    }
-    .neutral {
-        color: #666;
-        font-weight: 600;
-    }
-    .stDataFrame {
-        width: 100%;
     }
     .info-banner {
         background: #eff6ff;
@@ -169,7 +150,6 @@ if st.session_state.search_results:
             "name": fund_options[selected_label][0],
             "code": fund_options[selected_label][1],
         }
-        # Reset previous results
         st.session_state.holdings_data = None
         st.session_state.price_data = None
         st.session_state.computed_results = None
@@ -226,19 +206,156 @@ if st.session_state.selected_fund:
             </div>
             """, unsafe_allow_html=True)
     
-    # --- Step 2: Resolve tickers and fetch prices ---
+    # --- Show holdings overview (immediately after fetch) ---
     if st.session_state.holdings_data:
         holdings = st.session_state.holdings_data
         
-        # Show holdings summary
-        st.markdown(f"#### Portfolio Holdings ({len(holdings)} instruments)")
-        
-        # Filter to equity holdings only (price changes are meaningful for stocks)
+        # Separate equity vs non-equity
         equity_holdings = [h for h in holdings if h.get("instrument", "").lower() in ["equity", "stock"]]
         non_equity = [h for h in holdings if h.get("instrument", "").lower() not in ["equity", "stock"]]
         
+        # --- Summary cards ---
+        col_a, col_b, col_c, col_d = st.columns(4)
+        
+        with col_a:
+            st.metric("Total Holdings", len(holdings))
+        with col_b:
+            st.metric("Equity Holdings", len(equity_holdings))
+        with col_c:
+            st.metric("Non-Equity (Debt/Cash)", len(non_equity))
+        with col_d:
+            total_equity_weight = sum(h["weight"] for h in equity_holdings)
+            st.metric("Equity Exposure", f"{total_equity_weight:.1f}%")
+        
+        # --- Top 10 Holdings bar chart ---
+        st.markdown("#### 🏆 Top 10 Holdings by Weight")
+        
+        top10 = sorted(holdings, key=lambda x: x["weight"], reverse=True)[:10]
+        top10_df = pd.DataFrame(top10)
+        
+        fig_top = px.bar(
+            top10_df,
+            x="weight",
+            y="name",
+            orientation="h",
+            color="weight",
+            color_continuous_scale="Blues",
+            labels={"weight": "Portfolio Weight (%)", "name": ""},
+            title="",
+        )
+        fig_top.update_layout(
+            height=400,
+            yaxis={"categoryorder": "total ascending"},
+            showlegend=False,
+            margin=dict(l=0, r=20, t=0, b=0),
+            coloraxis_showscale=False,
+        )
+        fig_top.update_traces(
+            texttemplate="%{x:.2f}%",
+            textposition="outside",
+        )
+        st.plotly_chart(fig_top, use_container_width=True)
+        
+        # --- Sector allocation pie chart ---
+        st.markdown("#### 🥧 Sector Allocation")
+        
+        sector_totals = defaultdict(lambda: {"weight": 0, "count": 0})
+        for h in holdings:
+            sector = h.get("sector", "Unknown") or "Unknown"
+            if sector == "N/A" or sector == "":
+                sector = "Unknown"
+            sector_totals[sector]["weight"] += h["weight"]
+            sector_totals[sector]["count"] += 1
+        
+        sector_df = pd.DataFrame(
+            [{"Sector": s, "Weight (%)": d["weight"], "Holdings": d["count"]}
+             for s, d in sector_totals.items()]
+        ).sort_values("Weight (%)", ascending=False)
+        
+        col_pie, col_sector_table = st.columns([1.2, 1])
+        
+        with col_pie:
+            fig_pie = px.pie(
+                sector_df,
+                values="Weight (%)",
+                names="Sector",
+                hole=0.4,
+                color_discrete_sequence=px.colors.qualitative.Set3,
+            )
+            fig_pie.update_traces(
+                textposition="inside",
+                textinfo="percent+label",
+                textfont_size=11,
+            )
+            fig_pie.update_layout(
+                height=400,
+                showlegend=False,
+                margin=dict(l=10, r=10, t=10, b=10),
+            )
+            st.plotly_chart(fig_pie, use_container_width=True)
+        
+        with col_sector_table:
+            st.markdown("**Sector Breakdown**")
+            st.dataframe(
+                sector_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Weight (%)": st.column_config.ProgressColumn(
+                        format="%.2f%%",
+                        min_value=0,
+                        max_value=max(sector_df["Weight (%)"].max(), 1),
+                    ),
+                },
+            )
+        
+        # --- Non-equity holdings ---
         if non_equity:
-            st.caption(f"ℹ️ {len(equity_holdings)} equity holdings + {len(non_equity)} non-equity (debt/cash/repo) — only equity is used for return estimation.")
+            st.markdown("#### 💰 Non-Equity Holdings (Debt / Cash / Repo)")
+            non_equity_df = pd.DataFrame(non_equity)
+            non_equity_df = non_equity_df[["name", "sector", "instrument", "weight"]].rename(columns={
+                "name": "Instrument",
+                "sector": "Category",
+                "instrument": "Type",
+                "weight": "Weight (%)",
+            })
+            non_equity_df = non_equity_df.sort_values("Weight (%)", ascending=False)
+            st.dataframe(
+                non_equity_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Weight (%)": st.column_config.NumberColumn(format="%.2f%%"),
+                },
+            )
+        
+        # --- Full holdings table (expandable) ---
+        with st.expander("📋 View All Holdings (Full List)", expanded=False):
+            all_holdings_df = pd.DataFrame(holdings)
+            all_holdings_df = all_holdings_df.rename(columns={
+                "name": "Company / Instrument",
+                "sector": "Sector",
+                "instrument": "Type",
+                "weight": "Weight (%)",
+            })
+            all_holdings_df = all_holdings_df.sort_values("Weight (%)", ascending=False)
+            st.dataframe(
+                all_holdings_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Weight (%)": st.column_config.NumberColumn(format="%.2f%%"),
+                },
+            )
+        
+        st.divider()
+        
+        # --- Step 2: Fetch live prices and estimate return ---
+        st.markdown("### 🚀 Estimate Today's Return")
+        
+        if non_equity:
+            st.caption(f"ℹ️ {len(equity_holdings)} equity holdings will be used for return estimation. "
+                       f"{len(non_equity)} non-equity holdings (debt/cash/repo) are excluded.")
         
         if st.button("🚀 Fetch Live Prices & Estimate Return", type="primary"):
             # Resolve tickers
@@ -253,7 +370,8 @@ if st.session_state.selected_fund:
                         unresolved.append(h["name"])
             
             if unresolved:
-                st.warning(f"⚠️ Could not resolve tickers for {len(unresolved)} holdings: {', '.join(unresolved[:5])}{'...' if len(unresolved) > 5 else ''}")
+                st.warning(f"⚠️ Could not resolve tickers for {len(unresolved)} holdings: "
+                          f"{', '.join(unresolved[:5])}{'...' if len(unresolved) > 5 else ''}")
             
             resolved_holdings = [h for h in equity_holdings if h["name"] in ticker_map]
             
@@ -313,7 +431,6 @@ if st.session_state.selected_fund:
                             "Contribution %": "N/A",
                         })
                 
-                # Sort results by weight descending
                 results.sort(key=lambda x: x["Weight %"], reverse=True)
                 st.session_state.computed_results = {
                     "results": results,
@@ -332,31 +449,39 @@ if st.session_state.selected_fund:
             pos = comp["positive_contributors"]
             neg = comp["negative_contributors"]
             
-            # --- Estimated return ---
             estimated_return = sum(r["Contribution %"] for r in results if isinstance(r["Contribution %"], (int, float)))
             coverage = total_weight_used / (total_weight_used + total_weight_unresolved) * 100 if (total_weight_used + total_weight_unresolved) > 0 else 0
             
             st.divider()
             st.markdown("### 📊 Estimated Today's Return")
             
-            # Big metric
-            col1, col2, col3, col4 = st.columns(4)
+            # Big return banner
+            if estimated_return > 0:
+                st.markdown(f"""
+                <div style="background: linear-gradient(135deg, #dcfce7, #bbf7d0); border-radius: 12px; padding: 24px; text-align: center; margin: 10px 0;">
+                    <div style="font-size: 0.9rem; color: #166534; margin-bottom: 4px;">Estimated Return</div>
+                    <div style="font-size: 2.5rem; font-weight: 800; color: #15803d;">+{estimated_return:.3f}%</div>
+                    <div style="font-size: 0.85rem; color: #166534; margin-top: 4px;">📈 Positive — {len(pos)} gainers, {len(neg)} losers</div>
+                </div>
+                """, unsafe_allow_html=True)
+            elif estimated_return < 0:
+                st.markdown(f"""
+                <div style="background: linear-gradient(135deg, #fee2e2, #fecaca); border-radius: 12px; padding: 24px; text-align: center; margin: 10px 0;">
+                    <div style="font-size: 0.9rem; color: #991b1b; margin-bottom: 4px;">Estimated Return</div>
+                    <div style="font-size: 2.5rem; font-weight: 800; color: #dc2626;">{estimated_return:.3f}%</div>
+                    <div style="font-size: 0.85rem; color: #991b1b; margin-top: 4px;">📉 Negative — {len(pos)} gainers, {len(neg)} losers</div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.metric("Estimated Return", f"{estimated_return:.3f}%", delta="Neutral")
             
+            # Metrics row
+            col1, col2, col3 = st.columns(3)
             with col1:
-                if estimated_return > 0:
-                    st.metric("Estimated Return", f"+{estimated_return:.3f}%", delta="Positive 📈", delta_color="normal")
-                elif estimated_return < 0:
-                    st.metric("Estimated Return", f"{estimated_return:.3f}%", delta="Negative 📉", delta_color="inverse")
-                else:
-                    st.metric("Estimated Return", f"{estimated_return:.3f}%", delta="Neutral", delta_color="off")
-            
-            with col2:
                 st.metric("Portfolio Coverage", f"{coverage:.1f}%")
-            
-            with col3:
+            with col2:
                 st.metric("Gainers", f"{len(pos)} stocks", delta=f"+{sum(p[1] for p in pos):.2f}%" if pos else "0")
-            
-            with col4:
+            with col3:
                 st.metric("Losers", f"{len(neg)} stocks", delta=f"{sum(n[1] for n in neg):.2f}%" if neg else "0", delta_color="inverse" if neg else "off")
             
             if coverage < 90:
@@ -367,12 +492,52 @@ if st.session_state.selected_fund:
                 </div>
                 """, unsafe_allow_html=True)
             
-            # --- Detailed table ---
+            # --- Contribution waterfall chart ---
+            st.markdown("#### 📊 Contribution to Today's Return")
+            
+            chart_data = []
+            for r in results:
+                if isinstance(r["Contribution %"], (int, float)):
+                    chart_data.append({
+                        "Company": r["Company"][:20],
+                        "Contribution": r["Contribution %"],
+                        "Change": r["Change %"] if isinstance(r["Change %"], (int, float)) else 0,
+                        "Weight": r["Weight %"],
+                    })
+            
+            if chart_data:
+                chart_df = pd.DataFrame(chart_data)
+                chart_df["abs_contrib"] = chart_df["Contribution"].abs()
+                chart_df = chart_df.sort_values("abs_contrib", ascending=False).head(15)
+                chart_df = chart_df.sort_values("Contribution", ascending=True)
+                
+                colors = ["#dc2626" if v < 0 else "#16a34a" for v in chart_df["Contribution"]]
+                
+                fig_contrib = go.Figure(data=[
+                    go.Bar(
+                        x=chart_df["Contribution"],
+                        y=chart_df["Company"],
+                        orientation="h",
+                        marker_color=colors,
+                        text=[f"{'+' if v >= 0 else ''}{v:.4f}%" for v in chart_df["Contribution"]],
+                        textposition="outside",
+                    )
+                ])
+                fig_contrib.update_layout(
+                    height=450,
+                    xaxis_title="Contribution to Fund Return (%)",
+                    yaxis_title="",
+                    showlegend=False,
+                    margin=dict(l=0, r=60, t=0, b=40),
+                    xaxis=dict(zeroline=True, zerolinecolor="#333", zerolinewidth=1),
+                )
+                st.plotly_chart(fig_contrib, use_container_width=True)
+            
+            # --- Detailed holdings table with prices ---
             st.markdown("### 📋 Holdings with Price Changes")
             
             df = pd.DataFrame(results)
             
-            # Color-code the Change % and Contribution % columns
             st.dataframe(
                 df,
                 use_container_width=True,
@@ -387,6 +552,8 @@ if st.session_state.selected_fund:
                         help="This stock's contribution to the fund's return = weight × change%"
                     ),
                     "Weight %": st.column_config.NumberColumn(format="%.2f%%"),
+                    "Prev Close (₹)": st.column_config.NumberColumn(format="₹%.2f"),
+                    "Current (₹)": st.column_config.NumberColumn(format="₹%.2f"),
                 },
             )
             
