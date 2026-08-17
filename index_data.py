@@ -1,9 +1,11 @@
 """
 index_data.py - Fetch Indian market index values and daily changes.
 Uses yfinance batch download for speed, with individual fallback.
+Also provides render_index_bar() to render a scrollable index bar in Streamlit.
 """
 
 import yfinance as yf
+import streamlit as st
 
 # Index definitions: (display_name, yfinance_ticker)
 INDEXES = [
@@ -93,3 +95,103 @@ def fetch_index_data():
     order = {name: i for i, (name, _) in enumerate(INDEXES)}
     results.sort(key=lambda r: order.get(r["name"], 999))
     return results
+
+
+@st.cache_data(ttl=300)
+def _cached_index_data():
+    return fetch_index_data()
+
+
+def render_index_bar():
+    """Render a horizontal scrollable index bar at the top of the Streamlit page.
+    Shows Nifty 50, Sensex, and other Indian market indexes with today's value and change.
+    Positioned between the header and the main content tabs.
+    """
+    _lt = chr(60)
+    _cid = "idx-scroll"
+
+    # CSS for the index bar - horizontal scroll with thin scrollbar
+    st.markdown(_lt + "style" + chr(62) +
+        f"#{_cid} {{"
+        " overflow-x: auto;"
+        " overflow-y: hidden;"
+        " white-space: nowrap;"
+        " padding: 8px 0px;"
+        " margin: 0px -1rem 0px -1rem;"
+        " border-bottom: 1px solid rgba(128,128,128,0.2);"
+        " -webkit-overflow-scrolling: touch;"
+        " scrollbar-width: thin;"
+        " }"
+        f"#{_cid}::-webkit-scrollbar {{"
+        " height: 4px;"
+        " }"
+        f"#{_cid}::-webkit-scrollbar-thumb {{"
+        " background: rgba(128,128,128,0.3);"
+        " border-radius: 2px;"
+        " }"
+        f"#{_cid} .idx-card {{"
+        " display: inline-block;"
+        " min-width: 130px;"
+        " padding: 6px 14px;"
+        " margin-right: 4px;"
+        " border-radius: 8px;"
+        " text-align: center;"
+        " vertical-align: middle;"
+        " }"
+        ".idx-scroll-btn {{"
+        " display: inline-block;"
+        " vertical-align: middle;"
+        " cursor: pointer;"
+        " padding: 4px 8px;"
+        " font-size: 1.2rem;"
+        " }}"
+        + _lt + "/style" + chr(62),
+        unsafe_allow_html=True)
+
+    idx_data = _cached_index_data()
+    if not idx_data:
+        return
+
+    # Build index cards HTML using chr() to avoid tag stripping
+    cards = ""
+    for d in idx_data:
+        val = f"{d['value']:,.2f}"
+        chg = d["change"]
+        pct = d["change_pct"]
+        if pct >= 0:
+            bg = "rgba(16,185,129,0.12)"
+            tc = "#10b981"
+            ar = "\u25b2"
+        else:
+            bg = "rgba(239,68,68,0.12)"
+            tc = "#ef4444"
+            ar = "\u25bc"
+        cards += (
+            _lt + f"div class='idx-card' style='background:{bg};'" + chr(62)
+            + _lt + "div style='font-size:0.72rem;color:gray;font-weight:600;letter-spacing:0.5px;'" + chr(62) + d["name"] + _lt + "/div" + chr(62)
+            + _lt + "div style='font-size:1.05rem;font-weight:700;'" + chr(62) + val + _lt + "/div" + chr(62)
+            + _lt + f"div style='font-size:0.75rem;color:{tc};font-weight:600;'" + chr(62) + f"{ar} {chg:+.2f} ({pct:+.2f}%)" + _lt + "/div" + chr(62)
+            + _lt + "/div" + chr(62)
+        )
+
+    # Scroll buttons + container + JS for smooth scrolling
+    scroll_js = (
+        _lt + "script" + chr(62)
+        + f"function scrollIdx(dir) {{"
+        f"  var el = window.parent.document.getElementById('{_cid}');"
+        f"  if (el) {{ el.scrollBy({{left: dir * 200, behavior: 'smooth'}}); }}"
+        f"}}"
+        + _lt + "/script" + chr(62)
+    )
+    full_bar = (
+        _lt + "div style='display:flex;align-items:center;'" + chr(62)
+        + _lt + "span class='idx-scroll-btn' onclick='scrollIdx(-1)' style='color:#888;'" + chr(62) + "\u2e2c" + _lt + "/span" + chr(62)
+        + _lt + f"div id='{_cid}'" + chr(62)
+        + cards
+        + _lt + "/div" + chr(62)
+        + _lt + "span class='idx-scroll-btn' onclick='scrollIdx(1)' style='color:#888;'" + chr(62) + "\u2e32" + _lt + "/span" + chr(62)
+        + _lt + "/div" + chr(62)
+        + scroll_js
+    )
+    st.markdown(full_bar, unsafe_allow_html=True)
+    st.markdown("")
