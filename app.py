@@ -40,7 +40,7 @@ components.html("""
                   || window.parent.document.querySelector('.stApp');
             if (!el) return 'light';
             var bg = window.getComputedStyle(el).backgroundColor;
-            var m = bg.match(/\d+/g);
+             var m = bg.match(/\d+/g);
             if (m && parseInt(m[0]) < 50) return 'dark';
             return 'light';
         } catch(e) { return 'light'; }
@@ -84,44 +84,47 @@ st.session_state["theme_mode"] = "Dark" if _detected_theme == "dark" else "Light
 # Show app title in Streamlit's own header bar, left side, stays while scrolling
 # Also hide Fork/GitHub button and Streamlit footer/profile links
 # IMPORTANT: Keep the three-dot menu (stMainMenu) visible - it has the theme selector
-_lt = chr(60)
-st.markdown(_lt + "/style" + chr(62) +
-    # Title in header bar - gradient blue/purple for attractiveness
-    '[data-testid="stHeader"]::before {'
-    ' content: "MF Return Estimator";'
-    ' font-size: 1.15rem;'
-    ' font-weight: 800;'
-    ' margin-left: 1rem;'
-    ' margin-right: auto;'
-    ' white-space: nowrap;'
-    ' background: linear-gradient(135deg, #00b4d8, #7209b7);'
-    ' -webkit-background-clip: text;'
-    ' -webkit-text-fill-color: transparent;'
-    ' background-clip: text;'
-    ' }'
-    # Hide Fork button + GitHub repo link in header (keep three-dot menu!)
-    ' [data-testid="stHeaderContent"] a[href*="github"], '
-    ' [data-testid="stHeaderContent"] a[href*="fork"], '
-    ' [data-testid="stHeader"] a[target="_blank"], '
-    ' .stGithubFork, '
-    ' [data-testid="stGitFork"], '
-    ' [data-testid="stGithubFork"] {'
-    ' display: none !important;'
-    ' }'
-    # Hide Streamlit profile button + hosted-by text at bottom right
-    ' [data-testid="stProfileLink"], '
-    ' .stProfileLink, [data-testid="stStatusWidget"], '
-    ' footer [data-testid="stMarkdownContainer"], '
-    ' .stDeployButton, [data-testid="stDeployButton"] {'
-    ' display: none !important;'
-    ' }'
-    # Hide the streamlit footer entirely
-    ' footer, .stFooter, [data-testid="stFooter"], '
-    ' [data-testid="stBottom"] {'
-    ' display: none !important;'
-    ' }'
-    + _lt + "/style" + chr(62),
-    unsafe_allow_html=True)
+# Inject header/footer CSS via components.html() — this reliably renders
+# <style> tags (proven by the theme-detection JS above), whereas the old
+# chr(60)-based st.markdown call produced a malformed opening tag and the
+# CSS leaked onto the page as visible text.
+components.html("""
+<style>
+[data-testid="stHeader"]::before {
+    content: "MF Return Estimator";
+    font-size: 1.15rem;
+    font-weight: 800;
+    margin-left: 1rem;
+    margin-right: auto;
+    white-space: nowrap;
+    background: linear-gradient(135deg, #00b4d8, #7209b7);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+/* Hide Fork button + GitHub repo link in header (keep three-dot menu!) */
+[data-testid="stHeaderContent"] a[href*="github"],
+[data-testid="stHeaderContent"] a[href*="fork"],
+[data-testid="stHeader"] a[target="_blank"],
+.stGithubFork,
+[data-testid="stGitFork"],
+[data-testid="stGithubFork"] {
+    display: none !important;
+}
+/* Hide Streamlit profile button + hosted-by text at bottom right */
+[data-testid="stProfileLink"],
+.stProfileLink, [data-testid="stStatusWidget"],
+footer [data-testid="stMarkdownContainer"],
+.stDeployButton, [data-testid="stDeployButton"] {
+    display: none !important;
+}
+/* Hide the streamlit footer entirely */
+footer, .stFooter, [data-testid="stFooter"],
+[data-testid="stBottom"] {
+    display: none !important;
+}
+</style>
+""", height=0, width=0)
 
 # Also use JS to remove Fork/GitHub link and footer (CSS alone may not catch all)
 components.html("""
