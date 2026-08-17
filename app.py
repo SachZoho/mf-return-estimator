@@ -59,43 +59,28 @@ components.html("""
 _detected_theme = st.query_params.get("st_theme", "light")
 st.session_state["theme_mode"] = "Dark" if _detected_theme == "dark" else "Light"
 
-# Sticky title bar - fixed position so it stays visible while scrolling
-_bg = "#0e1117" if st.session_state.get("theme_mode") == "Dark" else "#ffffff"
-_st = chr(60) + "style" + chr(62)
-_ste = chr(60) + "/style" + chr(62)
-st.markdown(_st + """
-    .mf-sticky-title {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        z-index: 999999;
-        background-color: """ + _bg + """ !important;
-        padding: 12px 20px 8px 20px;
-        border-bottom: 1px solid rgba(128,128,128,0.3);
-        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+# Inject app title into Streamlit's own top header bar so it stays visible while scrolling
+components.html("""
+<script>
+    function injectTitle() {
+        var header = window.parent.document.querySelector('[data-testid="stHeader"]');
+        if (!header) { setTimeout(injectTitle, 200); return; }
+        if (header.querySelector('.mf-injected-title')) return;
+        var titleSpan = document.createElement('span');
+        titleSpan.className = 'mf-injected-title';
+        titleSpan.innerHTML = 'MF Return Estimator';
+        titleSpan.style.cssText = 'font-size:1.1rem;font-weight:700;color:inherit;'
+            + 'margin-left:16px;padding:6px 0;opacity:0.9;'
+            + 'white-space:nowrap;';
+        header.appendChild(titleSpan);
     }
-    .mf-sticky-title h1 {
-        font-size: 1.4rem !important;
-        margin: 0 !important;
-        padding: 0 !important;
-        line-height: 1.2 !important;
-    }
-    .mf-sticky-title p {
-        font-size: 0.75rem !important;
-        margin: 2px 0 0 0 !important;
-        padding: 0 !important;
-    }
-    .mf-sticky-spacer {
-        height: 70px;
-    }
-""" + _ste, unsafe_allow_html=True)
+    injectTitle();
+    setInterval(injectTitle, 2000);
+</script>
+""", height=0, width=0)
 
-st.markdown(chr(60) + 'div class="mf-sticky-title"' + chr(62), unsafe_allow_html=True)
-st.markdown("# MF Return Estimator")
+st.title("MF Return Estimator")
 st.caption("Estimate today's mutual fund return from underlying stock holdings")
-st.markdown(chr(60) + '/div' + chr(62), unsafe_allow_html=True)
-st.markdown(chr(60) + 'div class="mf-sticky-spacer"' + chr(62) + chr(60) + '/div' + chr(62), unsafe_allow_html=True)
 
 tab_search, tab_sheet = st.tabs(["Search MF", "Load from Sheet"])
 
