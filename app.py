@@ -60,17 +60,37 @@ _detected_theme = st.query_params.get("st_theme", "light")
 st.session_state["theme_mode"] = "Dark" if _detected_theme == "dark" else "Light"
 
 # Show app title in Streamlit's own header bar, left side, stays while scrolling
-# Pure CSS ::before puts it at the start of the header (before Fork/menu icons)
+# Also hide Fork/GitHub button, Streamlit profile links, and "hosted by" text
 _lt = chr(60)
 st.markdown(_lt + "style" + chr(62) +
+    # Title in header bar - gradient blue/purple for attractiveness
     '[data-testid="stHeader"]::before {'
     ' content: "MF Return Estimator";'
-    ' font-size: 1.1rem;'
-    ' font-weight: 700;'
+    ' font-size: 1.15rem;'
+    ' font-weight: 800;'
     ' margin-left: 1rem;'
     ' margin-right: auto;'
-    ' opacity: 0.9;'
     ' white-space: nowrap;'
+    ' background: linear-gradient(135deg, #00b4d8, #7209b7);'
+    ' -webkit-background-clip: text;'
+    ' -webkit-text-fill-color: transparent;'
+    ' background-clip: text;'
+    ' }'
+    # Hide Fork button + GitHub repo link in header
+    ' [data-testid="stGithubFork"], [data-testid="stGitFork"], '
+    ' [data-testid="stHeaderRepoLink"], .stGithubFork, '
+    ' a[href*="github.com"].st-ae {'
+    ' display: none !important;'
+    ' }'
+    # Hide Streamlit profile button + hosted-by text at bottom right
+    ' [data-testid="stProfileLink"], [data-testid="stMainMenu"], '
+    ' .stProfileLink, [data-testid="stStatusWidget"], '
+    ' footer [data-testid="stMarkdownContainer"] {'
+    ' display: none !important;'
+    ' }'
+    # Hide the streamlit footer entirely
+    ' footer, .stFooter, [data-testid="stFooter"] {'
+    ' display: none !important;'
     ' }'
     + _lt + "/style" + chr(62),
     unsafe_allow_html=True)
@@ -553,7 +573,3 @@ with tab_sheet:
                 "Enter a Google Sheet URL above to get started. "
                 "The sheet should have a tab named 'mf' with your fund list."
             )
-
-
-st.divider()
-st.caption("MF Return Estimator | Data: Google Sheets, mfapi.in, FinAPI, AMFI Portal, Yahoo Finance | Built with Streamlit")
