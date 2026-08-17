@@ -59,8 +59,35 @@ components.html("""
 _detected_theme = st.query_params.get("st_theme", "light")
 st.session_state["theme_mode"] = "Dark" if _detected_theme == "dark" else "Light"
 
-st.title("MF Return Estimator")
+# Sticky title bar - stays visible while scrolling
+_bg = "#0e1117" if st.session_state.get("theme_mode") == "Dark" else "ffffff"
+_st = chr(60) + "style" + chr(62)
+_ste = chr(60) + "/style" + chr(62)
+st.markdown(_st + """
+    .sticky-title {
+        position: sticky;
+        top: 0;
+        z-index: 999;
+        background-color: #" + _bg + " !important;
+        padding: 10px 0 6px 0;
+        margin-bottom: 4px;
+        border-bottom: 1px solid rgba(128,128,128,0.2);
+    }
+    .sticky-title h1 {
+        font-size: 1.5rem !important;
+        margin-bottom: 0 !important;
+        padding-top: 0 !important;
+    }
+    .sticky-title p {
+        font-size: 0.8rem !important;
+        margin-top: 2px !important;
+    }
+""" + _ste, unsafe_allow_html=True)
+
+st.markdown(chr(60) + 'div class="sticky-title"' + chr(62), unsafe_allow_html=True)
+st.markdown("# MF Return Estimator")
 st.caption("Estimate today's mutual fund return from underlying stock holdings")
+st.markdown(chr(60) + '/div' + chr(62), unsafe_allow_html=True)
 
 tab_search, tab_sheet = st.tabs(["Search MF", "Load from Sheet"])
 
