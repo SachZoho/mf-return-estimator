@@ -55,6 +55,25 @@ components.html("""
 </script>
 """, height=0, width=0)
 
+# --- Google Analytics 4 Integration (Measurement ID: G-WGVCPVK4H6) ---
+# Injects gtag.js into the parent page to track page views and user interactions
+components.html("""
+<script>
+    var d = window.parent.document;
+    var s = d.createElement('script');
+    s.async = true;
+    s.src = 'https://www.googletagmanager.com/gtag/js?id=G-WGVCPVK4H6';
+    d.head.appendChild(s);
+    window.parent.dataLayer = window.parent.dataLayer || [];
+    window.parent.gtag = function(){ window.parent.dataLayer.push(arguments); };
+    window.parent.gtag('js', new Date());
+    window.parent.gtag('config', 'G-WGVCPVK4H6', {
+        page_title: 'MF Return Estimator',
+        page_location: window.parent.location.href
+    });
+</script>
+""", height=0, width=0)
+
 # Read detected theme for Plotly chart templates
 _detected_theme = st.query_params.get("st_theme", "light")
 st.session_state["theme_mode"] = "Dark" if _detected_theme == "dark" else "Light"
