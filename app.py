@@ -59,25 +59,20 @@ components.html("""
 _detected_theme = st.query_params.get("st_theme", "light")
 st.session_state["theme_mode"] = "Dark" if _detected_theme == "dark" else "Light"
 
-# Inject app title into Streamlit's own top header bar so it stays visible while scrolling
-components.html("""
-<script>
-    function injectTitle() {
-        var header = window.parent.document.querySelector('[data-testid="stHeader"]');
-        if (!header) { setTimeout(injectTitle, 200); return; }
-        if (header.querySelector('.mf-injected-title')) return;
-        var titleSpan = document.createElement('span');
-        titleSpan.className = 'mf-injected-title';
-        titleSpan.innerHTML = 'MF Return Estimator';
-        titleSpan.style.cssText = 'font-size:1.1rem;font-weight:700;color:inherit;'
-            + 'margin-left:16px;padding:6px 0;opacity:0.9;'
-            + 'white-space:nowrap;';
-        header.appendChild(titleSpan);
-    }
-    injectTitle();
-    setInterval(injectTitle, 2000);
-</script>
-""", height=0, width=0)
+# Show app title in Streamlit's own header bar (already fixed at top, stays while scrolling)
+# Pure CSS approach - st.markdown renders in same doc as header, can target it
+_lt = chr(60)
+st.markdown(_lt + "style" + chr(62) +
+    '[data-testid="stHeader"]::after {'
+    ' content: "MF Return Estimator";'
+    ' font-size: 1.1rem;'
+    ' font-weight: 700;'
+    ' margin-left: 1rem;'
+    ' opacity: 0.85;'
+    ' white-space: nowrap;'
+    ' }'
+    + _lt + "/style" + chr(62),
+    unsafe_allow_html=True)
 
 st.title("MF Return Estimator")
 st.caption("Estimate today's mutual fund return from underlying stock holdings")
