@@ -26,70 +26,130 @@ INDEXES = [
 _TICKER_MAP = {t: n for n, t in INDEXES}
 
 
+def _fetch_ticker_history(ticker):
+    """Fetch current close and previous close for one ticker via per-ticker history.
+
+    Returns (curr, prev) or (None, None) if no data is available.
+    """
+    try:
+        hist = yf.Ticker(ticker).history(period="2d")
+        if hist.empty:
+            return (None, None)
+        curr = float(hist["Close"].iloc[-1])
+        if len(hist) >= 2:
+            prev = float(hist["Close"].iloc[-2])
+        else:
+            prev = curr
+        return (curr, prev)
+    except Exception:
+        return (None, None)
+
+
+def _fetch_ticker_info(ticker):
+    """Fetch change via yfinance .info as a last-resort fallback.
+
+    Returns (value, change, change_pct) or (None, None, None).
+    """
+    try:
+        info = yf.Ticker(ticker).info or {}
+    except Exception:
+        return (None, None, None)
+    value = info.get("regularMarketPrice")
+    change = info.get("regularMarketChange")
+    change_pct = info.get("regularMarketChangePercent")
+    # Some fields may be None; keep whatever is present
+    if value is None and change is None and change_pct is None:
+        return (None, None, None)
+    return (
+        float(value) if value is not None else None,
+        float(change) if change is not None else None,
+        float(change_pct) if change_pct is not None else None,
+    )
+
+
 def fetch_index_data():
     """Fetch current value and daily change for all tracked indexes.
 
     Returns a list of dicts: [{name, value, change, change_pct, ticker}, ...]
-    Only returns indexes that have valid data.
+    Only returns indexes that have valid data. Uses a batch yfinance download
+    for speed, then falls back to per-ticker history() whenever the batch
+    returns a zero/None change (which happens for indexes like NIFTY AUTO,
+    FMCG, METAL, ENERGY that only report intraday data in batch mode), and
+    finally to .info for regularMarketChange as a last resort.
     """
     results = []
     tickers = [t for _, t in INDEXES]
 
     # Batch download for speed
+    batch_close = None
     try:
         data = yf.download(tickers, period="2d", progress=False)
-        close = data["Close"] if "Close" in data else None
-        for _, ticker in INDEXES:
-            if close is not None and ticker in close.columns:
-                col = close[ticker].dropna()
-                if len(col) >= 2:
-                    curr = float(col.iloc[-1])
-                    prev = float(col.iloc[-2])
-                elif len(col) == 1:
-                    curr = float(col.iloc[-1])
-                    prev = curr
-                else:
-                    continue
+        if "Close" in data:
+            batch_close = data["Close"]
+    except Exception:
+        batch_close = None
+
+    for name, ticker in INDEXES:
+        curr = None
+        prev = None
+        change = None
+        change_pct = None
+
+        # 1) Try batch download for this ticker
+        if batch_close is not None and ticker in batch_close.columns:
+            col = batch_close[ticker].dropna()
+            if len(col) >= 2:
+                curr = float(col.iloc[-1])
+                prev = float(col.iloc[-2])
+            elif len(col) == 1:
+                # Only intraday data from batch -> change unknown, force fallback
+                curr = float(col.iloc[-1])
+                prev = None
+            # else: empty -> leave None
+            if curr is not None and prev is not None:
                 change = curr - prev
                 change_pct = (change / prev) * 100 if prev != 0 else 0.0
-                results.append({
-                    "name": _TICKER_MAP[ticker],
-                    "ticker": ticker,
-                    "value": curr,
-                    "change": change,
-                    "change_pct": change_pct,
-                    "prev_close": prev,
-                })
-    except Exception:
-        pass
 
-    # Fallback: fetch any missing tickers individually
-    fetched_tickers = {r["ticker"] for r in results}
-    for name, ticker in INDEXES:
-        if ticker in fetched_tickers:
+        # 2) If batch gave no/zero change, fall back to per-ticker history
+        if change is None or change == 0 or curr is None:
+            h_curr, h_prev = _fetch_ticker_history(ticker)
+            if h_curr is not None:
+                if curr is None:
+                    curr = h_curr
+                if h_prev is not None:
+                    prev = h_prev
+                change = curr - prev
+                change_pct = (change / prev) * 100 if prev not in (None, 0) else 0.0
+
+        # 3) Last resort: .info for regularMarketChange / regularMarketChangePercent
+        if (change is None or change == 0) and curr is None:
+            i_val, i_chg, i_pct = _fetch_ticker_info(ticker)
+            if i_val is not None:
+                curr = i_val
+            if i_chg is not None:
+                change = i_chg
+            if i_pct is not None:
+                change_pct = i_pct
+            # Derive prev close from value/change if we only got change
+            if curr is not None and change is not None and prev is None:
+                prev = curr - change if change is not None else curr
+
+        # 4) Skip indexes with no usable data at all
+        if curr is None:
             continue
-        try:
-            t = yf.Ticker(ticker)
-            hist = t.history(period="2d")
-            if hist.empty:
-                continue
-            curr = float(hist["Close"].iloc[-1])
-            if len(hist) >= 2:
-                prev = float(hist["Close"].iloc[-2])
-            else:
-                prev = curr
-            change = curr - prev
-            change_pct = (change / prev) * 100 if prev != 0 else 0.0
-            results.append({
-                "name": name,
-                "ticker": ticker,
-                "value": curr,
-                "change": change,
-                "change_pct": change_pct,
-                "prev_close": prev,
-            })
-        except Exception:
-            continue
+        if change is None:
+            change = 0.0
+        if change_pct is None:
+            change_pct = (change / prev) * 100 if prev not in (None, 0) else 0.0
+
+        results.append({
+            "name": name,
+            "ticker": ticker,
+            "value": curr,
+            "change": change,
+            "change_pct": change_pct,
+            "prev_close": prev if prev is not None else curr,
+        })
 
     # Preserve original order
     order = {name: i for i, (name, _) in enumerate(INDEXES)}
