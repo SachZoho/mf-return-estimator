@@ -1,73 +1,57 @@
-# --- Imports -----------------------------------------------------------------
+"""
+MF Return Estimator - Streamlit App
+Two modes:
+  1. Search MF - search by fund name, view holdings and estimated return
+  2. Load from Sheet - load multiple MFs from a Google Sheet, see summary table
+"""
+
 import streamlit as st
 import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-import json
 import requests
-from datetime import datetime, date
-import time
-from streamlit.components.v1 import components
-from streamlit.web.server.server import Server
-import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-warnings.filterwarnings("ignore", category=UserWarning)
-warnings.filterwarnings("ignore", category=FutureWarning)
+import re
+import io
+import plotly.express as px
+import plotly.graph_objects as go
+from collections import defaultdict
 
-# Force wide layout and configure the page once (must be before any other st call)
+from mf_data import search_funds, fetch_holdings, get_fund_nav, get_fund_meta
+from stock_data import resolve_ticker, fetch_price_changes
+from mf_helpers import compute_fund_return, render_fund_detail
+
+
 st.set_page_config(
     page_title="MF Return Estimator",
-    page_icon=":bar_chart:",
+    page_icon="chart_with_upwards_trend",
     layout="wide",
-    menu_items={
-        'Get Help': 'https://github.com/SachZoho/mf-return-estimator',
-        'Report a bug': 'https://github.com/SachZoho/mf-return-estimator/issues',
-        'About': "MF Return Estimator - Analyze and estimate returns on Indian Mutual Fund SIPs and Lumpsum investments."
-    }
+    initial_sidebar_state="collapsed",
 )
 
-# --- Theme Detection (light/dark) -------------------------------------------
-# Inject JS into parent document that detects the active Streamlit theme and
-# stores it as a query param so Python can pick it up to style Plotly charts.
+# --- Theme detection: use Streamlit's built-in Light/Dark switcher ---
+# (the three-dot menu top right). This JS snippet detects the active theme
+# and writes it to the URL query param so Plotly charts can adapt.
+import streamlit.components.v1 as components
+
 components.html("""
 <script>
     function detectTheme() {
         try {
-            var theme = 'light';
-            try {
-                var root = window.parent.document.documentElement;
-                if (root.classList.contains('st-emotion-layout') &&
-                    (root.getAttribute('data-teststate') === 'dark' ||
-                     window.parent.getComputedStyle(root).getPropertyValue('--background-color').trim() !== '')) {
-                    var bg = window.parent.getComputedStyle(root).getPropertyValue('background-color');
-                    if (bg) {
-                        var rgb = bg.match(/\d+/g);
-                        if (rgb && rgb.length >= 3) {
-                            var luminance = 0.299*parseInt(rgb[0]) + 0.587*parseInt(rgb[1]) + 0.114*parseInt(rgb[2]);
-                            theme = luminance < 128 ? 'dark' : 'light';
-                        }
-                    }
-                }
-            } catch(e) {}
-            try {
-                var header = window.parent.document.querySelector('[data-testid="stHeader"]');
-                if (header) {
-                    var bg = window.parent.getComputedStyle(header).getPropertyValue('background-color');
-                    if (bg) {
-                        var rgb = bg.match(/\d+/g);
-                        if (rgb && rgb.length >= 3) {
-                            var luminance = 0.299*parseInt(rgb[0]) + 0.587*parseInt(rgb[1]) + 0.114*parseInt(rgb[2]);
-                            theme = luminance < 128 ? 'dark' : 'light';
-                        }
-                    }
-                }
-            } catch(e) {}
-            var url = new URL(window.parent.location.href);
-            if (url.searchParams.get('st_theme') !== theme) {
-                url.searchParams.set('st_theme', theme);
-                window.parent.history.replaceState({}, '', url);
-            }
-        } catch(e) {}
+            var el = window.parent.document.querySelector('[data-testid="stAppViewContainer"]')
+                  || window.parent.document.querySelector('.stApp');
+            if (!el) return 'light';
+            var bg = window.getComputedStyle(el).backgroundColor;
+            var m = bg.match(/\d+/g);
+            if (m && parseInt(m[0]) < 50) return 'dark';
+            return 'light';
+        } catch(e) { return 'light'; }
+    }
+    var theme = detectTheme();
+    try {
+        var url = new URL(window.parent.location.href);
+        if (url.searchParams.get('st_theme') !== theme) {
+            url.searchParams.set('st_theme', theme);
+            window.parent.history.replaceState({}, '', url);
+        }
+    } catch(e) {}
 </script>
 """, height=0, width=0)
 
@@ -105,510 +89,545 @@ st.markdown(_lt + "style" + chr(62) +
     '[data-testid="stHeader"]::before {'
     ' content: "MF Return Estimator";'
     ' font-size: 1.15rem;'
-    ' font-weight: 700;'
-    ' margin-left: 16px;'
-    ' background: linear-gradient(90deg, #4A90E2, #9B51E0);'
+    ' font-weight: 800;'
+    ' margin-left: 1rem;'
+    ' margin-right: auto;'
+    ' white-space: nowrap;'
+    ' background: linear-gradient(135deg, #00b4d8, #7209b7);'
     ' -webkit-background-clip: text;'
-    ' background-clip: text;'
     ' -webkit-text-fill-color: transparent;'
-    '}'
-    # Hide Fork/GitHub button
-    '[data-testid="stHeaderContent"] [data-testid="stLogo"] {display: none;}'
-    # Hide Streamlit footer "Made with Streamlit"
-    '[data-testid="stFooter"] {display: none;}'
-    # Hide viewer profile/avatar links
-    '[data-testid="stHeader"] [data-testid="stHeaderUserMenu"] {display: none;}'
-    + _lt + "/style" + chr(62), unsafe_allow_html=True)
+    ' background-clip: text;'
+    ' }'
+    # Hide Fork button + GitHub repo link in header (keep three-dot menu!)
+    ' [data-testid="stHeaderContent"] a[href*="github"], '
+    ' [data-testid="stHeaderContent"] a[href*="fork"], '
+    ' [data-testid="stHeader"] a[target="_blank"], '
+    ' .stGithubFork, '
+    ' [data-testid="stGitFork"], '
+    ' [data-testid="stGithubFork"] {'
+    ' display: none !important;'
+    ' }'
+    # Hide Streamlit profile button + hosted-by text at bottom right
+    ' [data-testid="stProfileLink"], '
+    ' .stProfileLink, [data-testid="stStatusWidget"], '
+    ' footer [data-testid="stMarkdownContainer"], '
+    ' .stDeployButton, [data-testid="stDeployButton"] {'
+    ' display: none !important;'
+    ' }'
+    # Hide the streamlit footer entirely
+    ' footer, .stFooter, [data-testid="stFooter"], '
+    ' [data-testid="stBottom"] {'
+    ' display: none !important;'
+    ' }'
+    + _lt + "/style" + chr(62),
+    unsafe_allow_html=True)
 
-
-# --- Configuration -----------------------------------------------------------
-# MF_API base URL for fetching scheme master data
-MF_API_BASE = "https://api.mfapi.in"
-
-# Cache TTLs (seconds)
-CACHE_TTL_SCHEME_LIST = 24 * 60 * 60  # 1 day
-CACHE_TTL_NAV_HISTORY = 6 * 60 * 60   # 6 hours
-
-# SIP calculation constants
-SIP_DEFAULT_RATE = 0.10  # 10% expected annual return
-SIP_DEFAULT_YEARS = 10
-SIP_DEFAULT_MONTHLY = 5000  # ₹5,000/month
-
-# Risk-adjusted return estimates (annualized, based on category)
-# These are conservative midpoints used for projections when no history exists
-CATEGORY_RETURN_ESTIMATES = {
-    "Equity - Large Cap": 0.12,
-    "Equity - Large & Mid Cap": 0.13,
-    "Equity - Mid Cap": 0.15,
-    "Equity - Small Cap": 0.17,
-    "Equity - Multi Cap": 0.14,
-    "Equity - Flexi Cap": 0.14,
-    "Equity - Sectoral": 0.15,
-    "Equity - ELSS": 0.12,
-    "Equity - Dividend Yield": 0.10,
-    "Equity - Focused": 0.14,
-    "Equity - Value": 0.13,
-    "Hybrid - Balanced Advantage": 0.10,
-    "Hybrid - Aggressive": 0.11,
-    "Hybrid - Conservative": 0.08,
-    "Hybrid - Arbitrage": 0.06,
-    "Hybrid - Multi Asset": 0.10,
-    "Debt - Short Duration": 0.07,
-    "Debt - Medium Duration": 0.08,
-    "Debt - Long Duration": 0.09,
-    "Debt - Corporate Bond": 0.08,
-    "Debt - Banking & PSU": 0.07,
-    "Debt - Gilt": 0.07,
-    "Debt - Liquid": 0.06,
-    "Debt - Ultra Short": 0.06,
-    "Debt - Money Market": 0.06,
-    "Debt - Low Duration": 0.07,
-    "Debt - Credit Risk": 0.09,
-    "Index Funds": 0.11,
-    "ETF": 0.11,
-    "Solution Oriented - Retirement": 0.10,
-    "Solution Oriented - Children": 0.10,
-    "Other": 0.10,
+# Also use JS to remove Fork/GitHub link and footer (CSS alone may not catch all)
+components.html("""
+<script>
+function cleanup() {
+    try {
+        var doc = window.parent.document;
+        // Remove Fork button and GitHub repo link from header
+        var headerLinks = doc.querySelectorAll('[data-testid="stHeader"] a, [data-testid="stHeaderContent"] a');
+        headerLinks.forEach(function(a) {
+            var href = (a.href || '').toLowerCase();
+            var text = (a.textContent || '').toLowerCase();
+            if (href.indexOf('github') >= 0 || text.indexOf('fork') >= 0) {
+                a.style.display = 'none';
+            }
+        });
+        // Remove footer / profile / deploy buttons
+        var footer = doc.querySelector('footer');
+        if (footer) footer.style.display = 'none';
+        var profile = doc.querySelector('[data-testid="stProfileLink"]');
+        if (profile) profile.style.display = 'none';
+        var status = doc.querySelector('[data-testid="stStatusWidget"]');
+        if (status) status.style.display = 'none';
+        var bottom = doc.querySelector('[data-testid="stBottom"]');
+        if (bottom) bottom.style.display = 'none';
+    } catch(e) {}
 }
+cleanup();
+setInterval(cleanup, 1000);
+</script>
+""", height=0, width=0)
 
-# Default return when category is unknown
-DEFAULT_RETURN_ESTIMATE = 0.10
-
-# Mapping for normalized category names (to handle API variations)
-CATEGORY_ALIASES = {
-    "Equity Scheme - Large Cap Fund": "Equity - Large Cap",
-    "Equity Scheme - Large & Mid Cap Fund": "Equity - Large & Mid Cap",
-    "Equity Scheme - Mid Cap Fund": "Equity - Mid Cap",
-    "Equity Scheme - Small Cap Fund": "Equity - Small Cap",
-    "Equity Scheme - Multi Cap Fund": "Equity - Multi Cap",
-    "Equity Scheme - Flexi Cap Fund": "Equity - Flexi Cap",
-    "Equity Scheme - Sectoral/Thematic": "Equity - Sectoral",
-    "Equity Scheme - ELSS": "Equity - ELSS",
-    "Equity Scheme - Dividend Yield Fund": "Equity - Dividend Yield",
-    "Equity Scheme - Focused Fund": "Equity - Focused",
-    "Equity Scheme - Value Fund": "Equity - Value",
-    "Hybrid Scheme - Balanced Advantage Fund": "Hybrid - Balanced Advantage",
-    "Hybrid Scheme - Aggressive Hybrid Fund": "Hybrid - Aggressive",
-    "Hybrid Scheme - Conservative Hybrid Fund": "Hybrid - Conservative",
-    "Hybrid Scheme - Arbitrage Fund": "Hybrid - Arbitrage",
-    "Hybrid Scheme - Multi Asset Allocation Fund": "Hybrid - Multi Asset",
-    "Debt Scheme - Short Duration Fund": "Debt - Short Duration",
-    "Debt Scheme - Medium Duration Fund": "Debt - Medium Duration",
-    "Debt Scheme - Long Duration Fund": "Debt - Long Duration",
-    "Debt Scheme - Corporate Bond Fund": "Debt - Corporate Bond",
-    "Debt Scheme - Banking and PSU Fund": "Debt - Banking & PSU",
-    "Debt Scheme - Gilt Fund": "Debt - Gilt",
-    "Debt Scheme - Liquid Fund": "Debt - Liquid",
-    "Debt Scheme - Ultra Short Duration Fund": "Debt - Ultra Short",
-    "Debt Scheme - Money Market Fund": "Debt - Money Market",
-    "Debt Scheme - Low Duration Fund": "Debt - Low Duration",
-    "Debt Scheme - Credit Risk Fund": "Debt - Credit Risk",
-    "Index Fund Scheme": "Index Funds",
-    "Exchange Traded Fund": "ETF",
-    "Solution Oriented Scheme - Retirement Fund": "Solution Oriented - Retirement",
-    "Solution Oriented Scheme - Children Fund": "Solution Oriented - Children",
-}
+tab_search, tab_sheet = st.tabs(["Search MF", "Load from Sheet"])
 
 
-# --- Data fetching helpers ---------------------------------------------------
-@st.cache_data(ttl=CACHE_TTL_SCHEME_LIST, show_spinner=False)
-def fetch_scheme_list():
-    """Fetch the full list of mutual fund schemes from mfapi.in."""
-    try:
-        resp = requests.get(f"{MF_API_BASE}/mf", timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        # Build a DataFrame for easier filtering
-        df = pd.DataFrame(data)
-        # Expected columns: schemeCode, schemeName
-        if df.empty:
-            return pd.DataFrame(columns=["schemeCode", "schemeName"])
-        # Ensure schemeName is string
-        df["schemeName"] = df["schemeName"].astype(str)
-        # Sort alphabetically
-        df = df.sort_values("schemeName").reset_index(drop=True)
-        return df
-    except Exception as e:
-        st.error(f"Failed to fetch scheme list: {e}")
-        return pd.DataFrame(columns=["schemeCode", "schemeName"])
 
+# =======================================================================
+# TAB 1: Search MF (original flow)
+# =======================================================================
 
-@st.cache_data(ttl=CACHE_TTL_NAV_HISTORY, show_spinner=False)
-def fetch_nav_history(scheme_code, scheme_name):
-    """Fetch NAV history for a given scheme code."""
-    try:
-        resp = requests.get(f"{MF_API_BASE}/mf/{scheme_code}", timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        # Expected structure: { "status": "SUCCESS", "data": [ {date, nav, ...}, ... ], "meta": {...} }
-        if data.get("status") != "SUCCESS" or "data" not in data:
-            return pd.DataFrame(), {}
-        nav_data = data["data"]
-        if not nav_data:
-            return pd.DataFrame(), {}
-        df = pd.DataFrame(nav_data)
-        # Keep date and nav columns; parse
-        if "date" not in df.columns or "nav" not in df.columns:
-            return pd.DataFrame(), {}
-        df["date"] = pd.to_datetime(df["date"], format="%d-%m-%Y", errors="coerce")
-        df["nav"] = pd.to_numeric(df["nav"], errors="coerce")
-        df = df.dropna(subset=["date", "nav"])
-        # Sort ascending by date
-        df = df.sort_values("date").reset_index(drop=True)
-        # Meta info (scheme category, fund house, etc.)
-        meta = data.get("meta", {})
-        return df, meta
-    except Exception as e:
-        st.error(f"Failed to fetch NAV history for {scheme_name}: {e}")
-        return pd.DataFrame(), {}
-
-
-def normalize_category(category_str):
-    """Normalize a category string to our internal mapping."""
-    if not category_str:
-        return "Other"
-    # Direct match
-    if category_str in CATEGORY_RETURN_ESTIMATES:
-        return category_str
-    # Alias match
-    if category_str in CATEGORY_ALIASES:
-        return CATEGORY_ALIASES[category_str]
-    # Try case-insensitive substring matching
-    cat_lower = category_str.lower()
-    for key, val in CATEGORY_ALIASES.items():
-        if key.lower() in cat_lower or cat_lower in key.lower():
-            return val
-    # Heuristic: keyword-based
-    if "large" in cat_lower and "cap" in cat_lower:
-        return "Equity - Large Cap"
-    if "mid" in cat_lower and "cap" in cat_lower:
-        return "Equity - Mid Cap"
-    if "small" in cat_lower and "cap" in cat_lower:
-        return "Equity - Small Cap"
-    if "debt" in cat_lower or "bond" in cat_lower or "gilt" in cat_lower:
-        if "short" in cat_lower:
-            return "Debt - Short Duration"
-        if "medium" in cat_lower:
-            return "Debt - Medium Duration"
-        if "long" in cat_lower:
-            return "Debt - Long Duration"
-        return "Debt - Corporate Bond"
-    if "hybrid" in cat_lower or "balanced" in cat_lower:
-        return "Hybrid - Balanced Advantage"
-    if "liquid" in cat_lower:
-        return "Debt - Liquid"
-    if "index" in cat_lower:
-        return "Index Funds"
-    if "etf" in cat_lower:
-        return "ETF"
-    if "elss" in cat_lower or "tax" in cat_lower:
-        return "Equity - ELSS"
-    return "Other"
-
-
-def get_category_return_estimate(category):
-    """Get the expected annualized return for a category."""
-    return CATEGORY_RETURN_ESTIMATES.get(category, DEFAULT_RETURN_ESTIMATE)
-
-
-# --- Return calculation helpers ----------------------------------------------
-def calculate_sip_future_value(monthly_investment, annual_rate, years):
-    """Calculate the future value of a SIP using the standard formula.
-    FV = P * [((1 + i)^n - 1) / i] * (1 + i)
-    where i = monthly rate, n = number of months, P = monthly investment.
-    """
-    if annual_rate <= 0 or years <= 0 or monthly_investment <= 0:
-        return 0.0
-    i = annual_rate / 12  # monthly rate
-    n = years * 12        # number of months
-    fv = monthly_investment * (((1 + i) ** n - 1) / i) * (1 + i)
-    return fv
-
-
-def calculate_lumpsum_future_value(principal, annual_rate, years):
-    """Calculate the future value of a lumpsum investment.
-    FV = P * (1 + r)^n
-    """
-    if annual_rate <= 0 or years <= 0 or principal <= 0:
-        return 0.0
-    fv = principal * ((1 + annual_rate) ** years)
-    return fv
-
-
-def calculate_cagr(start_value, end_value, years):
-    """Calculate Compound Annual Growth Rate."""
-    if start_value <= 0 or end_value <= 0 or years <= 0:
-        return 0.0
-    return (end_value / start_value) ** (1 / years) - 1
-
-
-def calculate_returns_from_nav(nav_df, periods_years):
-    """Calculate realized returns from NAV history over specified periods.
-    Returns a dict of {period: annualized_return}.
-    """
-    if nav_df.empty or len(nav_df) < 2:
-        return {}
-    results = {}
-    latest = nav_df.iloc[-1]
-    latest_nav = latest["nav"]
-    latest_date = latest["date"]
-    for yrs in periods_years:
-        if yrs <= 0:
-            continue
-        target_date = latest_date - pd.DateOffset(years=yrs)
-        # Find the nav closest to (but not after) the target date
-        mask = nav_df["date"] <= target_date
-        if not mask.any():
-            # Use the earliest available
-            start_row = nav_df.iloc[0]
-        else:
-            start_row = nav_df.loc[mask].iloc[-1]
-        start_nav = start_row["nav"]
-        start_date = start_row["date"]
-        # Actual years between the two dates
-        actual_years = (latest_date - start_date).days / 365.25
-        if actual_years <= 0 or start_nav <= 0:
-            results[yrs] = np.nan
-            continue
-        cagr = calculate_cagr(start_nav, latest_nav, actual_years)
-        results[yrs] = cagr
-    return results
-
-
-def build_nav_chart(nav_df, theme_mode="light"):
-    """Build a Plotly chart of NAV history with theme-aware styling."""
-    if nav_df.empty:
-        return None
-    # Sample if too many points to keep the chart responsive
-    plot_df = nav_df
-    if len(plot_df) > 1500:
-        step = max(1, len(plot_df) // 1500)
-        plot_df = plot_df.iloc[::step].copy()
-    if theme_mode == "dark":
-        paper_bg = "rgba(0,0,0,0)"
-        plot_bg = "rgba(0,0,0,0)"
-        text_color = "#fafafa"
-        grid_color = "rgba(255,255,255,0.08)"
-        line_color = "#4A90E2"
-    else:
-        paper_bg = "rgba(0,0,0,0)"
-        plot_bg = "rgba(0,0,0,0)"
-        text_color = "#2c2c2c"
-        grid_color = "rgba(0,0,0,0.08)"
-        line_color = "#1f77b4"
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=plot_df["date"], y=plot_df["nav"],
-        mode="lines",
-        name="NAV",
-        line=dict(color=line_color, width=1.8),
-        hovertemplate="<b>%{x|%d %b %Y}</b><br>NAV: ₹%{y:.4f}<extra></extra>",
-    ))
-    fig.update_layout(
-        title="NAV History",
-        title_x=0.5,
-        title_font=dict(size=14),
-        paper_bgcolor=paper_bg,
-        plot_bgcolor=plot_bg,
-        font=dict(color=text_color, size=11),
-        margin=dict(l=8, r=8, t=40, b=8),
-        xaxis=dict(showgrid=True, gridcolor=grid_color),
-        yaxis=dict(showgrid=True, gridcolor=grid_color, tickprefix="₹"),
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        height=380,
+with tab_search:
+    st.info(
+        "How it works: Enter a fund name, the app fetches its holdings, "
+        "resolves each stock to an NSE ticker, fetches today's price changes, "
+        "and computes the weighted estimated return."
     )
-    fig.update_xaxes(tickformat="%b %Y")
-    return fig
 
+    if "search_results" not in st.session_state:
+        st.session_state.search_results = []
+    if "selected_fund" not in st.session_state:
+        st.session_state.selected_fund = None
+    if "holdings_data" not in st.session_state:
+        st.session_state.holdings_data = None
+    if "holdings_source" not in st.session_state:
+        st.session_state.holdings_source = None
+    if "holdings_date" not in st.session_state:
+        st.session_state.holdings_date = None
+    if "price_data" not in st.session_state:
+        st.session_state.price_data = None
+    if "computed_results" not in st.session_state:
+        st.session_state.computed_results = None
 
-def build_projection_chart(monthly_investment, annual_rate, years, theme_mode="light"):
-    """Build a cumulative-investment vs projected-value chart for a SIP."""
-    if monthly_investment <= 0 or annual_rate <= 0 or years <= 0:
-        return None
-    i = annual_rate / 12
-    n_total = int(years * 12)
-    months = np.arange(1, n_total + 1)
-    # Cumulative invested
-    invested = monthly_investment * months
-    # Future value at each month
-    fv = monthly_investment * (((1 + i) ** months - 1) / i) * (1 + i)
-    if theme_mode == "dark":
-        text_color = "#fafafa"
-        grid_color = "rgba(255,255,255,0.08)"
-        inv_color = "#9B51E0"
-        val_color = "#4A90E2"
-    else:
-        text_color = "#2c2c2c"
-        grid_color = "rgba(0,0,0,0.08)"
-        inv_color = "#7B3FCB"
-        val_color = "#1f77b4"
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=months, y=invested, mode="lines", name="Invested",
-        line=dict(color=inv_color, width=2, dash="dot"),
-        hovertemplate="Month %{x}<br>Invested: ₹%{y:,.0f}<extra></extra>",
-    ))
-    fig.add_trace(go.Scatter(
-        x=months, y=fv, mode="lines", name="Projected Value",
-        line=dict(color=val_color, width=2),
-        hovertemplate="Month %{x}<br>Value: ₹%{y:,.0f}<extra></extra>",
-    ))
-    fig.update_layout(
-        title="SIP Projection: Invested vs Projected Value",
-        title_x=0.5,
-        title_font=dict(size=14),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color=text_color, size=11),
-        margin=dict(l=8, r=8, t=40, b=8),
-        xaxis=dict(title="Month", showgrid=True, gridcolor=grid_color),
-        yaxis=dict(title="Amount (₹)", showgrid=True, gridcolor=grid_color, tickprefix="₹"),
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        height=380,
-    )
-    return fig
+    st.markdown("---")
 
+    col_search, col_btn = st.columns([4, 1])
+    with col_search:
+        search_query = st.text_input("Search Mutual Fund", placeholder="Type a fund name... e.g. ICICI Prudential FlexiCap", label_visibility="collapsed")
+    with col_btn:
+        search_btn = st.button("Search", type="primary", use_container_width=True)
 
-# --- Main UI -----------------------------------------------------------------
-def main():
-    st.title("MF Return Estimator")
-    st.caption("Analyze Indian mutual fund SIPs and lumpsum investments with real NAV history.")
+    if search_btn and search_query:
+        with st.spinner("Searching funds..."):
+            results = search_funds(search_query, limit=15)
+            st.session_state.search_results = results
+            st.session_state.selected_fund = None
+            st.session_state.holdings_data = None
+            st.session_state.price_data = None
+            st.session_state.computed_results = None
+        if not results:
+            st.warning("No funds found. Try a different search term.")
 
-    # Sidebar - scheme search
-    with st.sidebar:
-        st.header("Fund Lookup")
-        scheme_list_df = fetch_scheme_list()
-        if scheme_list_df.empty:
-            st.error("Could not load the fund list. Please refresh.")
-            st.stop()
-        search_term = st.text_input(
-            "Search fund by name",
-            value="",
-            placeholder="e.g. Parag Parikh, Axis Bluechip, HDFC Mid",
-            help="Type a fund name or keyword. Matches are case-insensitive.",
+    if not st.session_state.search_results and not st.session_state.selected_fund:
+        st.markdown("**Try these popular funds:**")
+        suggestion_cols = st.columns(6)
+        suggestions = ["ICICI Prudential FlexiCap", "Parag Parikh Flexi Cap", "HDFC Mid Cap", "SBI Small Cap", "Axis Bluechip", "Mirae Asset Large Cap"]
+        for i, suggestion in enumerate(suggestions):
+            col = suggestion_cols[i % 6]
+            if col.button(suggestion, key=f"sugg_{i}"):
+                with st.spinner("Searching..."):
+                    results = search_funds(suggestion, limit=15)
+                    st.session_state.search_results = results
+                    st.session_state.selected_fund = None
+                    st.session_state.holdings_data = None
+                    st.session_state.computed_results = None
+                st.rerun()
+
+    if st.session_state.search_results and not st.session_state.selected_fund:
+        st.markdown(f"#### Found {len(st.session_state.search_results)} matching funds")
+        st.caption("Click a fund below to analyze it")
+        fund_options = [(r["scheme_name"], r["scheme_code"]) for r in st.session_state.search_results]
+        for idx, (label, code) in enumerate(fund_options):
+            col_name, col_btn2 = st.columns([5, 1])
+            with col_name:
+                st.markdown(f"**{idx + 1}.** {label}")
+            with col_btn2:
+                if st.button("Select", key=f"select_{idx}", use_container_width=True):
+                    st.session_state.selected_fund = {"name": label, "code": code}
+                    st.session_state.holdings_data = None
+                    st.session_state.price_data = None
+                    st.session_state.computed_results = None
+                    st.rerun()
+        st.markdown("---")
+
+    if st.session_state.selected_fund:
+        fund = st.session_state.selected_fund
+        fund_name = fund["name"]
+        fund_code = fund["code"]
+        if st.button("Search a different fund"):
+            st.session_state.selected_fund = None
+            st.session_state.holdings_data = None
+            st.session_state.computed_results = None
+            st.rerun()
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            with st.spinner("Fetching NAV..."):
+                nav_val, nav_date = get_fund_nav(fund_code)
+        with col2:
+            meta = get_fund_meta(fund_code)
+            fund_house = meta.get("fund_house", "N/A")
+        with col3:
+            scheme_type = meta.get("scheme_type", "N/A")
+
+        if st.session_state.holdings_data is None:
+            with st.spinner("Fetching portfolio holdings..."):
+                holdings, source, holdings_date = fetch_holdings(fund_name, fund_code)
+            if holdings:
+                st.session_state.holdings_data = holdings
+                st.session_state.holdings_source = source
+                st.session_state.holdings_date = holdings_date
+                date_info = f" (as of {holdings_date})" if holdings_date else ""
+                st.success(f"Found {len(holdings)} holdings (Source: {source}{date_info})")
+            else:
+                st.error("Could not fetch holdings.")
+                with st.expander("Technical details (click to expand)", expanded=False):
+                    st.code(source, language="text")
+
+        if st.session_state.holdings_data:
+            holdings = st.session_state.holdings_data
+            holdings_date = st.session_state.get("holdings_date")
+            equity_holdings = [h for h in holdings if h.get("instrument", "").lower() in ("equity", "stock", "foreign equity")]
+
+            st.markdown("---")
+            st.markdown("### Estimate Today's Return")
+
+            if st.button("Fetch Live Prices & Estimate Return", type="primary"):
+                with st.spinner("Resolving stock tickers..."):
+                    ticker_map = {}
+                    unresolved = []
+                    for h in equity_holdings:
+                        ticker = resolve_ticker(h["name"])
+                        if ticker:
+                            ticker_map[h["name"]] = ticker
+                        else:
+                            unresolved.append(h["name"])
+                if unresolved:
+                    st.warning(f"Could not resolve tickers for {len(unresolved)} holdings: {', '.join(unresolved[:5])}{'...' if len(unresolved) > 5 else ''}")
+                resolved_holdings = [h for h in equity_holdings if h["name"] in ticker_map]
+                if resolved_holdings:
+                    all_tickers = list(set(ticker_map.values()))
+                    with st.spinner(f"Fetching today's prices for {len(all_tickers)} stocks..."):
+                        price_data = fetch_price_changes(all_tickers)
+                    st.session_state.price_data = price_data
+                    results = []
+                    total_weight_used = 0
+                    total_weight_unresolved = 0
+                    for h in equity_holdings:
+                        name = h["name"]
+                        weight = h["weight"]
+                        ticker = ticker_map.get(name)
+                        if ticker and ticker in price_data:
+                            pd_data = price_data[ticker]
+                            change_pct = pd_data["change_pct"]
+                            contribution = (weight / 100) * change_pct
+                            total_weight_used += weight
+                            results.append({"name": name, "ticker": ticker, "weight": weight, "change_pct": change_pct, "contribution": contribution, "prev_close": pd_data["prev_close"], "curr_price": pd_data["curr_price"]})
+                        else:
+                            total_weight_unresolved += weight
+                    if results:
+                        total_estimated_return = sum(r["contribution"] for r in results)
+                        coverage = total_weight_used / (total_weight_used + total_weight_unresolved) * 100 if (total_weight_used + total_weight_unresolved) > 0 else 0
+                        if total_estimated_return >= 0:
+                            st.success(f"Estimated Today's Return: +{total_estimated_return:.4f}%")
+                        else:
+                            st.error(f"Estimated Today's Return: {total_estimated_return:.4f}%")
+                        st.caption(f"Based on {len(results)} resolved holdings covering {coverage:.1f}% of portfolio weight.")
+
+                        col_pos, col_neg = st.columns(2)
+                        with col_pos:
+                            st.markdown("#### Top Positive Contributors")
+                            pos = sorted([(r["name"], r["contribution"]) for r in results if r["contribution"] > 0], key=lambda x: x[1], reverse=True)
+                            for name, contrib in pos[:5]:
+                                st.markdown(f"**{name}**: +{contrib:.4f}%")
+                        with col_neg:
+                            st.markdown("#### Top Negative Contributors")
+                            neg = sorted([(r["name"], r["contribution"]) for r in results if r["contribution"] < 0], key=lambda x: x[1])
+                            for name, contrib in neg[:5]:
+                                st.markdown(f"**{name}**: {contrib:.4f}%")
+
+                        results_df = pd.DataFrame(results)
+                        results_df = results_df[["name", "ticker", "weight", "prev_close", "curr_price", "change_pct", "contribution"]].rename(columns={
+                            "name": "Company", "ticker": "Ticker", "weight": "Weight (%)",
+                            "prev_close": "Prev Close", "curr_price": "Current Price",
+                            "change_pct": "Change (%)", "contribution": "Contribution",
+                        })
+                        results_df = results_df.sort_values("Contribution", ascending=False)
+                        st.markdown("#### Detailed Breakdown")
+                        st.dataframe(results_df, use_container_width=True, hide_index=True, column_config={
+                            "Weight (%)": st.column_config.NumberColumn(format="%.2f%%"),
+                            "Change (%)": st.column_config.NumberColumn(format="%.2f%%"),
+                            "Contribution": st.column_config.NumberColumn(format="%.4f%%"),
+                        })
+                        top15 = results_df.head(15)
+                        fig_water = go.Figure(go.Waterfall(
+                            x=top15["Company"], y=top15["Contribution"], orientation="v",
+                            connector={"line": {"color": "#ccc"}},
+                            increasing={"marker": {"color": "#10b981"}},
+                            decreasing={"marker": {"color": "#ef4444"}},
+                        ))
+                        _tmpl = "plotly_dark" if st.session_state.get("theme_mode") == "Dark" else "plotly_white"
+                        fig_water.update_layout(title="Contribution Waterfall (Top 15 by Impact)", yaxis_title="Contribution (%)", height=400, margin=dict(l=20, r=20, t=40, b=80), template=_tmpl)
+                        fig_water.update_xaxes(tickangle=45)
+                        st.plotly_chart(fig_water, use_container_width=True)
+
+            st.markdown("---")
+            nav_float = None
+            try:
+                nav_float = float(nav_val) if nav_val else None
+            except (ValueError, TypeError):
+                pass
+            render_fund_detail(fund_name, fund_code, holdings, st.session_state.holdings_source, holdings_date, nav_float, None, None)
+
+    if not st.session_state.search_results and not st.session_state.selected_fund:
+        st.markdown(
+            """
+            ### Get Started
+
+            Type a fund name in the search box above, or click one of the suggestion buttons.
+
+            ---
+
+            ### How the return is calculated
+
+            **Estimated Return = Sum (Holding Weight x Stock's Daily Change %)**
+
+            For example, if TVS Motor (9.29% weight) is down -0.81% today, its contribution to the fund's return is:
+
+            `9.29% x (-0.81%) = -0.0752%`
+
+            Summing all such contributions gives the estimated fund return for the day.
+
+            ### Limitations
+
+            - Holdings are disclosed **monthly** by AMCs. The fund may have traded since the last disclosure.
+            - **Debt, cash, and repo holdings** are excluded from the calculation (only equity is used).
+            - Some stocks may not be in the ticker database.
+            - This is an **estimate**, not the actual NAV return.
+            """
         )
-        # Filter schemes
-        if search_term.strip():
-            mask = scheme_list_df["schemeName"].str.contains(search_term, case=False, na=False)
-            filtered = scheme_list_df.loc[mask].head(50)
-        else:
-            # Show some popular schemes as default
-            popular_keywords = ["Parag Parikh Flexi", "Axis Bluechip", "HDFC Mid-Cap",
-                                "Mirae Asset Large Cap", "SBI Small Cap", "ICICI Pru Bluechip"]
-            mask = scheme_list_df["schemeName"].str.contains("|".join(popular_keywords), case=False, na=False, regex=True)
-            filtered = scheme_list_df.loc[mask].head(50)
-        if filtered.empty:
-            st.info("No funds match your search. Try another keyword.")
-            st.stop()
-        options = filtered["schemeName"].tolist()
-        selected_name = st.selectbox(
-            f"Matching funds ({len(options)} shown)",
-            options=options,
-            index=0,
+
+
+# =======================================================================
+# TAB 2: Load from Sheet
+# =======================================================================
+
+with tab_sheet:
+    if "sheet_mf_list" not in st.session_state:
+        st.session_state.sheet_mf_list = []
+    if "sheet_mf_results" not in st.session_state:
+        st.session_state.sheet_mf_results = None
+    if "sheet_detail_idx" not in st.session_state:
+        st.session_state.sheet_detail_idx = None
+
+    if st.session_state.sheet_detail_idx is not None and st.session_state.sheet_mf_results:
+        idx = st.session_state.sheet_detail_idx
+        results = st.session_state.sheet_mf_results
+        if idx >= len(results):
+            st.session_state.sheet_detail_idx = None
+            st.rerun()
+
+        result = results[idx]
+        if st.button("Back to Summary", type="secondary"):
+            st.session_state.sheet_detail_idx = None
+            st.rerun()
+
+        render_fund_detail(
+            result["name"], result.get("code", ""),
+            result.get("holdings", []), None,
+            result.get("holdings_date"), result.get("nav"),
+            result.get("day_change"), result.get("return_details"),
         )
-        selected_row = filtered.loc[filtered["schemeName"] == selected_name].iloc[0]
-        scheme_code = str(selected_row["schemeCode"])
-        st.session_state["selected_scheme_code"] = scheme_code
-        st.session_state["selected_scheme_name"] = selected_name
+        if result.get("error"):
+            st.warning(f"Note: {result['error']}")
 
-    # Fetch NAV history for the selected scheme
-    scheme_code = st.session_state.get("selected_scheme_code")
-    scheme_name = st.session_state.get("selected_scheme_name")
-    if not scheme_code:
-        st.warning("Please select a fund from the sidebar.")
-        st.stop()
-    with st.spinner(f"Loading NAV history for {scheme_name}..."):
-        nav_df, meta = fetch_nav_history(scheme_code, scheme_name)
-
-    if nav_df.empty:
-        st.error("No NAV history available for this scheme.")
-        st.stop()
-
-    # Display scheme metadata
-    category_raw = meta.get("scheme_category", "")
-    fund_house = meta.get("mutual_fund_family", meta.get("fund_house", ""))
-    scheme_type = meta.get("scheme_type", "")
-    normalized_cat = normalize_category(category_raw)
-    return_estimate = get_category_return_estimate(normalized_cat)
-
-    # Header with fund details
-    st.subheader(scheme_name)
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Fund House", fund_house or "-")
-    col2.metric("Category", normalized_cat)
-    col3.metric("Scheme Type", scheme_type or "-")
-    # Latest NAV
-    latest_nav = nav_df.iloc[-1]["nav"]
-    latest_nav_date = nav_df.iloc[-1]["date"].strftime("%d %b %Y")
-    col4.metric("Latest NAV", f"₹{latest_nav:.4f}", f"as on {latest_nav_date}")
-
-    # NAV chart
-    st.write("### NAV History")
-    theme_mode = st.session_state.get("theme_mode", "Light")
-    nav_fig = build_nav_chart(nav_df, theme_mode)
-    if nav_fig:
-        st.plotly_chart(nav_fig, use_container_width=True)
-    # Data range note
-    st.caption(f"Showing {len(nav_df)} NAV data points from {nav_df.iloc[0]['date'].strftime('%d %b %Y')} to {latest_nav_date}.")
-
-    # Realized returns section
-    st.write("### Realized Returns (from NAV history)")
-    periods = [1, 3, 5, 7, 10, 15]
-    available_periods = [p for p in periods if (nav_df.iloc[-1]["date"] - nav_df.iloc[0]["date"]).days >= p * 365]
-    if not available_periods:
-        st.info("This fund does not have enough history to compute realized returns for standard periods.")
     else:
-        realized = calculate_returns_from_nav(nav_df, available_periods)
-        realized_clean = {p: r for p, r in realized.items() if not np.isnan(r)}
-        if realized_clean:
-            rcols = st.columns(len(realized_clean))
-            for col, (p, r) in zip(rcols, realized_clean.items()):
-                col.metric(f"{p}Y CAGR", f"{r*100:.2f}%")
+        st.markdown("### Load MFs from Google Sheet")
+        st.caption(
+            "Enter the URL of a public Google Sheet (anyone with link can view) "
+            "that has a tab named 'mf' with your fund list."
+        )
+
+        col_url, col_load = st.columns([5, 1])
+        with col_url:
+            sheet_url_input = st.text_input(
+                "Google Sheet URL",
+                placeholder="https://docs.google.com/spreadsheets/d/...",
+                key="sheet_url_field",
+                label_visibility="collapsed",
+            )
+        with col_load:
+            load_btn = st.button("Load", type="primary", use_container_width=True)
+
+        if load_btn and sheet_url_input:
+            with st.spinner("Loading MFs from Google Sheet..."):
+                match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", sheet_url_input)
+                if not match:
+                    st.error("Could not extract Sheet ID from URL.")
+                else:
+                    sheet_id = match.group(1)
+                    csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet=mf"
+                    try:
+                        resp = requests.get(csv_url, timeout=30)
+                        resp.raise_for_status()
+                        df = pd.read_csv(io.StringIO(resp.text))
+                        if df.empty:
+                            st.error("No data found in the 'mf' tab.")
+                        else:
+                            name_col = None
+                            code_col = None
+                            for col in df.columns:
+                                cl = col.lower().strip()
+                                if cl in ("scheme_name", "scheme name", "name", "fund_name", "fund name", "mf name", "mf_name"):
+                                    name_col = col
+                                if cl in ("scheme_code", "scheme code", "code", "amfi_code", "amfi code", "amfi"):
+                                    code_col = col
+                            if not name_col:
+                                name_col = df.columns[0]
+                            mf_list = []
+                            for _, row in df.iterrows():
+                                name = str(row[name_col]).strip()
+                                code = ""
+                                if code_col:
+                                    raw_code = str(row[code_col]).strip()
+                                    if raw_code and raw_code.lower() not in ("nan", "none", ""):
+                                        code = raw_code
+                                if name and name.lower() not in ("nan", "none", ""):
+                                    mf_list.append({"name": name, "code": code})
+                            st.session_state.sheet_mf_list = mf_list
+                            st.session_state.sheet_mf_results = None
+                            st.session_state.sheet_detail_idx = None
+                            st.success(f"Loaded {len(mf_list)} MFs from sheet.")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to load sheet: {str(e)[:100]}")
+
+        if st.session_state.sheet_mf_list:
+            st.markdown("---")
+            st.markdown("### Fetch Returns for All MFs")
+
+            col_fetch, col_refresh, col_count = st.columns([2, 2, 2])
+            with col_fetch:
+                fetch_btn = st.button("Fetch All Returns", type="primary", key="sheet_fetch_btn")
+            with col_refresh:
+                refresh_btn = st.button("Refresh (Re-fetch)", type="secondary", key="sheet_refresh_btn")
+            with col_count:
+                st.metric("MFs Loaded", len(st.session_state.sheet_mf_list))
+
+            if fetch_btn or refresh_btn:
+                mf_list = st.session_state.sheet_mf_list
+                results = []
+                progress = st.progress(0, "Starting...")
+
+                for i, mf in enumerate(mf_list):
+                    pct = (i + 1) / len(mf_list)
+                    progress.progress(pct, text=f"Processing {i + 1}/{len(mf_list)}: {mf['name'][:50]}...")
+
+                    result = {
+                        "name": mf["name"], "code": mf["code"],
+                        "nav": None, "day_change": None,
+                        "holdings_count": 0, "holdings": [],
+                        "holdings_date": None, "return_details": [],
+                        "error": None,
+                    }
+
+                    scheme_code = mf["code"]
+                    if not scheme_code:
+                        sr = search_funds(mf["name"], limit=5)
+                        if sr:
+                            best = max(sr, key=lambda x: x.get("score", 0))
+                            scheme_code = str(best["scheme_code"])
+                            result["code"] = scheme_code
+
+                    if not scheme_code:
+                        result["error"] = "Could not find scheme code"
+                        results.append(result)
+                        continue
+
+                    nav_val, nav_date = get_fund_nav(scheme_code)
+                    if nav_val:
+                        try:
+                            result["nav"] = float(nav_val)
+                        except (ValueError, TypeError):
+                            pass
+
+                    try:
+                        holdings, source, holdings_date = fetch_holdings(mf["name"], scheme_code)
+                        if holdings:
+                            result["holdings"] = holdings
+                            result["holdings_count"] = len(holdings)
+                            result["holdings_date"] = holdings_date
+                            day_change, return_details = compute_fund_return(holdings)
+                            result["day_change"] = day_change
+                            result["return_details"] = return_details
+                        else:
+                            result["error"] = source or "No holdings found"
+                    except Exception as e:
+                        result["error"] = str(e)[:100]
+
+                    results.append(result)
+
+                progress.progress(1.0, "Done!")
+                st.session_state.sheet_mf_results = results
+                st.rerun()
+
+            if st.session_state.sheet_mf_results:
+                results = st.session_state.sheet_mf_results
+                st.markdown("---")
+                st.markdown("### Summary - All MF Returns")
+
+                summary_rows = []
+                for i, r in enumerate(results):
+                    change = r.get("day_change")
+                    nav = r.get("nav")
+                    summary_rows.append({
+                        "#": i + 1,
+                        "MF Name": r["name"],
+                        "Holdings": r.get("holdings_count", 0),
+                        "Day Change (%)": round(change, 4) if change is not None else None,
+                        "Current NAV": round(nav, 4) if nav else None,
+                        "Holdings As Of": r.get("holdings_date") or "Unknown",
+                        "Status": "OK" if not r.get("error") else f"Error: {r['error'][:40]}",
+                    })
+                summary_df = pd.DataFrame(summary_rows)
+
+                st.dataframe(
+                    summary_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Day Change (%)": st.column_config.NumberColumn(
+                            format="%.4f%%",
+                            help="Estimated return based on underlying stock holdings",
+                        ),
+                        "Current NAV": st.column_config.NumberColumn(format="Rs. %.4f"),
+                        "Holdings": st.column_config.NumberColumn(help="Click View Holdings below to see detail"),
+                    },
+                )
+
+                st.markdown("---")
+                st.markdown("### View Holdings Detail")
+                st.caption("Select an MF and click the button to view its full holdings breakdown.")
+
+                fund_names = [f"{i + 1}. {r['name'][:60]}" for i, r in enumerate(results)]
+                selected_idx = st.selectbox(
+                    "Select an MF to view its holdings",
+                    range(len(results)),
+                    format_func=lambda i: fund_names[i],
+                    key="sheet_detail_selectbox",
+                )
+
+                col_view, col_back = st.columns([1, 3])
+                with col_view:
+                    if st.button("View Holdings", type="primary", use_container_width=True, key="sheet_view_btn"):
+                        st.session_state.sheet_detail_idx = selected_idx
+                        st.rerun()
+
+                st.markdown("---")
+                col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+                with col_s1:
+                    total_mfs = len(results)
+                    ok_count = sum(1 for r in results if not r.get("error"))
+                    st.metric("MFs Loaded", f"{ok_count}/{total_mfs}")
+                with col_s2:
+                    avg_vals = [r["day_change"] for r in results if r.get("day_change") is not None]
+                    avg_change = sum(avg_vals) / len(avg_vals) if avg_vals else 0
+                    st.metric("Avg Day Change", f"{avg_change:+.4f}%")
+                with col_s3:
+                    gainers = sum(1 for v in avg_vals if v > 0)
+                    st.metric("Gainers", gainers)
+                with col_s4:
+                    losers = sum(1 for v in avg_vals if v < 0)
+                    st.metric("Losers", losers)
+            else:
+                st.info("Click 'Fetch All Returns' to load holdings, NAV, and estimated returns for all MFs in your sheet.")
+
         else:
-            st.info("Could not compute realized returns for this fund.")
-
-    # Projection section
-    st.write("### Projected Returns")
-    st.write("Estimate the future value of SIP or lumpsum investments in this fund.")
-    proj_tabs = st.tabs(["SIP", "Lumpsum"])
-    with proj_tabs[0]:
-        st.write("#### SIP Calculator")
-        sc1, sc2, sc3 = st.columns(3)
-        monthly = sc1.number_input("Monthly Investment (₹)", min_value=500, value=SIP_DEFAULT_MONTHLY, step=500, key="sip_monthly")
-        sip_years = sc2.number_input("Duration (years)", min_value=1, max_value=40, value=SIP_DEFAULT_YEARS, key="sip_years")
-        sip_rate = sc3.number_input("Expected Annual Return (%)", min_value=1.0, max_value=30.0, value=round(return_estimate*100, 2), step=0.5, key="sip_rate") / 100.0
-        sip_fv = calculate_sip_future_value(monthly, sip_rate, sip_years)
-        total_invested = monthly * sip_years * 12
-        gains = sip_fv - total_invested
-        mc1, mc2, mc3 = st.columns(3)
-        mc1.metric("Total Invested", f"₹{total_invested:,.0f}")
-        mc2.metric("Projected Value", f"₹{sip_fv:,.0f}")
-        mc3.metric("Estimated Gains", f"₹{gains:,.0f}", f"{(gains/total_invested*100) if total_invested else 0:.1f}%")
-        st.write("##### Projection Chart")
-        proj_fig = build_projection_chart(monthly, sip_rate, sip_years, theme_mode)
-        if proj_fig:
-            st.plotly_chart(proj_fig, use_container_width=True)
-        st.caption("Note: Projections are based on the assumed return rate and do not guarantee future performance. Mutual fund investments are subject to market risks.")
-    with proj_tabs[1]:
-        st.write("#### Lumpsum Calculator")
-        lc1, lc2, lc3 = st.columns(3)
-        principal = lc1.number_input("Investment Amount (₹)", min_value=1000, value=100000, step=5000, key="lump_principal")
-        lump_years = lc2.number_input("Duration (years)", min_value=1, max_value=40, value=10, key="lump_years")
-        lump_rate = lc3.number_input("Expected Annual Return (%)", min_value=1.0, max_value=30.0, value=round(return_estimate*100, 2), step=0.5, key="lump_rate") / 100.0
-        lump_fv = calculate_lumpsum_future_value(principal, lump_rate, lump_years)
-        lump_gains = lump_fv - principal
-        lc1m, lc2m, lc3m = st.columns(3)
-        lc1m.metric("Invested", f"₹{principal:,.0f}")
-        lc2m.metric("Projected Value", f"₹{lump_fv:,.0f}")
-        lc3m.metric("Estimated Gains", f"₹{lump_gains:,.0f}", f"{(lump_gains/principal*100) if principal else 0:.1f}%")
-        st.caption("Note: Projections are based on the assumed return rate and do not guarantee future performance. Mutual fund investments are subject to market risks.")
-
-    # Footer / disclaimer
-    st.divider()
-    st.caption("Data source: mfapi.in. This tool is for informational purposes only and is not investment advice.")
-
-
-if __name__ == "__main__":
-    main()
+            st.info(
+                "Enter a Google Sheet URL above to get started. "
+                "The sheet should have a tab named 'mf' with your fund list."
+            )
