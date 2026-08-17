@@ -12,6 +12,13 @@ from mf_data import search_funds, fetch_holdings, get_fund_nav, get_fund_meta
 from stock_data import resolve_ticker, fetch_price_changes
 
 
+def _chart_template():
+    """Return Plotly template name based on current theme."""
+    if getattr(st, "session_state", None) and st.session_state.get("theme_mode") == "Dark":
+        return "plotly_dark"
+    return "plotly_white"
+
+
 def compute_fund_return(holdings):
     """Given holdings list, resolve tickers, fetch prices, return (day_change, details)."""
     equity = [
@@ -86,7 +93,7 @@ def render_fund_detail(fund_name, fund_code, holdings, source, holdings_date, na
     fig_top.update_layout(
         height=400, yaxis={"categoryorder": "total ascending"},
         showlegend=False, margin=dict(l=0, r=20, t=0, b=0),
-        coloraxis_showscale=False,
+        coloraxis_showscale=False, template=_chart_template(),
     )
     fig_top.update_traces(texttemplate="%{x:.2f}%", textposition="outside")
     st.plotly_chart(fig_top, use_container_width=True)
@@ -111,7 +118,7 @@ def render_fund_detail(fund_name, fund_code, holdings, source, holdings_date, na
             color_discrete_sequence=px.colors.qualitative.Set3,
         )
         fig_pie.update_traces(textposition="inside", textinfo="percent+label", textfont_size=11)
-        fig_pie.update_layout(height=400, showlegend=False, margin=dict(l=10, r=10, t=10, b=10))
+        fig_pie.update_layout(height=400, showlegend=False, margin=dict(l=10, r=10, t=10, b=10), template=_chart_template())
         st.plotly_chart(fig_pie, use_container_width=True)
     with col_table:
         st.markdown("**Sector Breakdown**")
@@ -157,7 +164,7 @@ def render_fund_detail(fund_name, fund_code, holdings, source, holdings_date, na
         fig_water.update_layout(
             title="Contribution Waterfall (Top 15 by Impact)",
             yaxis_title="Contribution (%)", height=400,
-            margin=dict(l=20, r=20, t=40, b=80),
+            margin=dict(l=20, r=20, t=40, b=80), template=_chart_template(),
         )
         fig_water.update_xaxes(tickangle=45)
         st.plotly_chart(fig_water, use_container_width=True)
