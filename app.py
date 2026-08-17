@@ -59,9 +59,18 @@ _se = chr(60) + "/style" + chr(62)
 
 if st.session_state.theme_mode == "Dark":
     st.markdown(_s + """
-    /* ===== MAIN APP BACKGROUND ===== */
-    .stApp, .stApp > header { background-color: #0e1117 !important; }
-    .stApp { color: #e6edf3 !important; }
+    /* ===== MAIN APP BACKGROUND + HEADER BAR ===== */
+    .stApp { background-color: #0e1117 !important; color: #e6edf3 !important; }
+    .stApp > header, [data-testid="stHeader"],
+    [data-testid="stToolbar"], [data-testid="stMainMenu"],
+    header[data-testid="stHeader"] {
+        background-color: #0e1117 !important;
+        color: #e6edf3 !important;
+    }
+    [data-testid="stHeader"] * { color: #e6edf3 !important; }
+    [data-testid="stToolbar"] * { color: #e6edf3 !important; }
+    [data-testid="stMainMenu"] svg { fill: #e6edf3 !important; color: #e6edf3 !important; }
+    [data-testid="stHeader"] svg { fill: #e6edf3 !important; color: #e6edf3 !important; }
 
     /* ===== ALL TEXT ELEMENTS ===== */
     .stApp, .stApp p, .stApp span, .stApp li, .stApp strong,
@@ -461,9 +470,9 @@ with tab_search:
         )
 
 
-# ========================================================================
+# =======================================================================
 # TAB 2: Load from Sheet
-# ========================================================================
+# =======================================================================
 
 with tab_sheet:
     if "sheet_mf_list" not in st.session_state:
