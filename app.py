@@ -59,23 +59,21 @@ components.html("""
 _detected_theme = st.query_params.get("st_theme", "light")
 st.session_state["theme_mode"] = "Dark" if _detected_theme == "dark" else "Light"
 
-# Show app title in Streamlit's own header bar (already fixed at top, stays while scrolling)
-# Pure CSS approach - st.markdown renders in same doc as header, can target it
+# Show app title in Streamlit's own header bar, left side, stays while scrolling
+# Pure CSS ::before puts it at the start of the header (before Fork/menu icons)
 _lt = chr(60)
 st.markdown(_lt + "style" + chr(62) +
-    '[data-testid="stHeader"]::after {'
+    '[data-testid="stHeader"]::before {'
     ' content: "MF Return Estimator";'
     ' font-size: 1.1rem;'
     ' font-weight: 700;'
     ' margin-left: 1rem;'
-    ' opacity: 0.85;'
+    ' margin-right: auto;'
+    ' opacity: 0.9;'
     ' white-space: nowrap;'
     ' }'
     + _lt + "/style" + chr(62),
     unsafe_allow_html=True)
-
-st.title("MF Return Estimator")
-st.caption("Estimate today's mutual fund return from underlying stock holdings")
 
 tab_search, tab_sheet = st.tabs(["Search MF", "Load from Sheet"])
 
