@@ -26,49 +26,200 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Theme state
-if "theme_mode" not in st.session_state:
+# --- Theme: read from URL query param so it survives refresh ---
+_qp = st.query_params
+_url_theme = _qp.get("theme", "").lower()
+if _url_theme in ("dark", "light"):
+    st.session_state.theme_mode = _url_theme.capitalize()
+elif "theme_mode" not in st.session_state:
     st.session_state.theme_mode = "Light"
 
+_current_theme = st.session_state.theme_mode
+
 # Title + theme toggle (top right)
-col_title, col_theme = st.columns([7, 1])
+col_title, col_theme = st.columns([8, 1])
 with col_title:
     st.title("MF Return Estimator")
     st.caption("Estimate today's mutual fund return from underlying stock holdings")
 with col_theme:
     st.markdown("&nbsp;")
-    _tm = st.radio("Mode", ["Light", "Dark"], horizontal=True, key="theme_radio", label_visibility="collapsed")
-    st.session_state.theme_mode = _tm
+    _new_theme = st.radio(
+        "Mode", ["Light", "Dark"], horizontal=True,
+        index=0 if _current_theme == "Light" else 1,
+        key="theme_radio", label_visibility="collapsed",
+    )
+    if _new_theme != _current_theme:
+        st.session_state.theme_mode = _new_theme
+        st.query_params["theme"] = _new_theme.lower()
+        st.rerun()
 
-# Inject CSS for theme using chr() to avoid HTML tag stripping
-_lt = chr(60) + "style" + chr(62)
-_le = chr(60) + "/style" + chr(62)
+# Inject CSS using chr() to build style tags (avoids HTML stripping in commit)
+_s = chr(60) + "style" + chr(62)
+_se = chr(60) + "/style" + chr(62)
 
 if st.session_state.theme_mode == "Dark":
-    st.markdown(_lt + """
-    .stApp { background-color: #0e1117; color: #fafafa; }
-    .stApp p, .stApp span, .stApp li, .stApp strong { color: #fafafa !important; }
-    .stApp .stMetric label { color: #8b949e !important; }
-    .stApp .stMetric [data-testid="stMetricValue"] { color: #fafafa !important; }
-    .stApp [data-testid="stSidebar"] { background-color: #161b22; }
-    .stApp [data-testid="stSidebar"] * { color: #c9d1d9 !important; }
-    .stApp .stTabs [data-baseweb="tab"] { color: #8b949e; }
-    .stApp .stTabs [aria-selected="true"] { color: #fafafa !important; }
-    .stApp [data-testid="stExpander"] { background-color: #161b22; border-color: #30363d !important; }
-    .stApp [data-testid="stExpander"] * { color: #c9d1d9; }
-    .stApp .stAlert { background-color: #161b22 !important; }
-    .stApp .stAlert * { color: #c9d1d9 !important; }
-    .stApp [data-testid="stDataFrame"] { background-color: #161b22; }
-    .stApp input, .stApp textarea { background-color: #0d1117 !important; color: #fafafa !important; }
-    .stApp [data-baseweb="select"] > div { background-color: #161b22 !important; }
-    .stApp [data-baseweb="base-input"] { background-color: #0d1117 !important; }
+    st.markdown(_s + """
+    /* ===== MAIN APP BACKGROUND ===== */
+    .stApp, .stApp > header { background-color: #0e1117 !important; }
+    .stApp { color: #e6edf3 !important; }
+
+    /* ===== ALL TEXT ELEMENTS ===== */
+    .stApp, .stApp p, .stApp span, .stApp li, .stApp strong,
+    .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6 {
+        color: #e6edf3 !important;
+    }
+    .stApp .stMarkdown, .stApp .stMarkdown p, .stApp .stMarkdown span {
+        color: #e6edf3 !important;
+    }
+
+    /* ===== METRICS ===== */
+    .stApp [data-testid="stMetric"] label {
+        color: #8b949e !important;
+    }
+    .stApp [data-testid="stMetric"] [data-testid="stMetricValue"] {
+        color: #e6edf3 !important;
+    }
+    .stApp [data-testid="stMetric"] [data-testid="stMetricDelta"] {
+        color: #e6edf3 !important;
+    }
+
+    /* ===== BUTTONS (fix: white box issue) ===== */
+    .stApp .stButton button {
+        background-color: #21262d !important;
+        color: #e6edf3 !important;
+        border: 1px solid #30363d !important;
+    }
+    .stApp .stButton button:hover {
+        background-color: #30363d !important;
+        color: #ffffff !important;
+        border-color: #8b949e !important;
+    }
+    .stApp .stButton button[kind="primary"] {
+        background-color: #1f6feb !important;
+        color: #ffffff !important;
+        border: none !important;
+    }
+    .stApp .stButton button[kind="primary"]:hover {
+        background-color: #388bfd !important;
+        color: #ffffff !important;
+    }
+
+    /* ===== INPUT FIELDS ===== */
+    .stApp input, .stApp textarea,
+    .stApp [data-baseweb="input"] input,
+    .stApp [data-baseweb="textarea"] textarea {
+        background-color: #0d1117 !important;
+        color: #e6edf3 !important;
+        border-color: #30363d !important;
+    }
+    .stApp input::placeholder, .stApp textarea::placeholder {
+        color: #6e7681 !important;
+        opacity: 1 !important;
+    }
+    .stApp [data-baseweb="base-input"] {
+        background-color: #0d1117 !important;
+    }
+
+    /* ===== SELECT BOXES ===== */
+    .stApp [data-baseweb="select"] > div {
+        background-color: #0d1117 !important;
+        color: #e6edf3 !important;
+        border-color: #30363d !important;
+    }
+    .stApp [data-baseweb="select"] span {
+        color: #e6edf3 !important;
+    }
+
+    /* ===== TABS ===== */
+    .stApp .stTabs [data-baseweb="tab"] {
+        color: #8b949e !important;
+        background-color: transparent !important;
+    }
+    .stApp .stTabs [data-baseweb="tab"]:hover {
+        color: #e6edf3 !important;
+    }
+    .stApp .stTabs [aria-selected="true"] {
+        color: #ffffff !important;
+    }
+    .stApp .stTabs [data-baseweb="tab-highlight"] {
+        background-color: #1f6feb !important;
+    }
+    .stApp .stTabs [data-baseweb="tab-border"] {
+        border-bottom-color: #1f6feb !important;
+    }
+
+    /* ===== SIDEBAR ===== */
+    .stApp [data-testid="stSidebar"] {
+        background-color: #161b22 !important;
+    }
+    .stApp [data-testid="stSidebar"] * {
+        color: #c9d1d9 !important;
+    }
+
+    /* EXPANDERS */
+    .stApp [data-testid="stExpander"] {
+        background-color: #161b22 !important;
+        border-color: #30363d !important;
+    }
+    .stApp [data-testid="stExpander"] * {
+        color: #e6edf3 !important;
+    }
+
+    /* ===== ALERTS / INFO BOXES ===== */
+    .stApp [data-testid="stAlert"] {
+        background-color: #161b22 !important;
+        color: #e6edf3 !important;
+        border: 1px solid #30363d !important;
+    }
+    .stApp [data-testid="stAlert"] * {
+        color: #e6edf3 !important;
+    }
+
+    /* ===== DATAFRAMES ===== */
+    .stApp [data-testid="stDataFrame"] {
+        background-color: #161b22 !important;
+        color: #e6edf3 !important;
+    }
+    .stApp [data-testid="stDataFrame"] * {
+        color: #e6edf3 !important;
+    }
+    .stApp .stDataFrame table, .stApp .stDataFrame th, .stApp .stDataFrame td {
+        background-color: #0d1117 !important;
+        color: #e6edf3 !important;
+        border-color: #30363d !important;
+    }
+
+    /* ===== PROGRESS BAR ===== */
+    .stApp [data-testid="stProgress"] > div > div {
+        background-color: #1f6feb !important;
+    }
+
+    /* ===== HORIZONTAL RULES ===== */
     .stApp hr { border-color: #30363d !important; }
-    .stApp [data-testid="stVerticalBlock"] > div { color: #c9d1d9; }
-    """ + _le, unsafe_allow_html=True)
+
+    /* ===== CONTAINERS / COLUMNS ===== */
+    .stApp [data-testid="stVerticalBlock"] > div {
+        color: #e6edf3 !important;
+    }
+    .stApp [data-testid="column"] {
+        color: #e6edf3 !important;
+    }
+
+    /* ===== CODE BLOCKS ===== */
+    .stApp code, .stApp pre {
+        background-color: #161b22 !important;
+        color: #e6edf3 !important;
+    }
+
+    /* ===== DATA TABLE HEADER ===== */
+    .stApp [data-testid="stDataFrame"] [data-testid="stTableHeader"] {
+        background-color: #21262d !important;
+    }
+    """ + _se, unsafe_allow_html=True)
 else:
-    st.markdown(_lt + """
+    st.markdown(_s + """
     .stApp { background-color: #ffffff; color: #262730; }
-    """ + _le, unsafe_allow_html=True)
+    """ + _se, unsafe_allow_html=True)
 
 
 tab_search, tab_sheet = st.tabs(["Search MF", "Load from Sheet"])
@@ -310,9 +461,9 @@ with tab_search:
         )
 
 
-# =======================================================================
+# ========================================================================
 # TAB 2: Load from Sheet
-# =======================================================================
+# ========================================================================
 
 with tab_sheet:
     if "sheet_mf_list" not in st.session_state:
