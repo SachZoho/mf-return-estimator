@@ -57,7 +57,7 @@ components.html("""
 """, height=0, width=0)
 
 # --- Google Analytics 4 Integration (Measurement ID: G-WGVCPVK4H6) ---
-# Injects gtag.js into the PARENT document (same approach as theme detection JS)
+# Injects gtag.js into the PARENT document (same approach as the theme detection JS)
 components.html("""
 <script>
     var d = window.parent.document;
@@ -83,9 +83,9 @@ st.session_state["theme_mode"] = "Dark" if _detected_theme == "dark" else "Light
 
 # Show app title in Streamlit's own header bar, left side, stays while scrolling
 # Also hide Fork/GitHub button and Streamlit footer/profile links
-# IMPORTANT: Keep the three-dot menu (stMainMenu) visible - it has theme selector
+# IMPORTANT: Keep the three-dot menu (stMainMenu) visible - it has the theme selector
 _lt = chr(60)
-st.markdown(_lt + "style" + chr(62) +
+st.markdown(_lt + "/style" + chr(62) +
     # Title in header bar - gradient blue/purple for attractiveness
     '[data-testid="stHeader"]::before {'
     ' content: "MF Return Estimator";'
@@ -154,10 +154,10 @@ setInterval(cleanup, 1000);
 </script>
 """, height=0, width=0)
 
-tab_search, tab_sheet = st.tabs(["Search MF", "Load from Sheet"])
-
 # Show market index bar (Nifty 50, Sensex, etc.) between header and tabs
 render_index_bar()
+
+tab_search, tab_sheet = st.tabs(["Search MF", "Load from Sheet"])
 
 
 
@@ -203,13 +203,13 @@ with tab_search:
             st.session_state.holdings_data = None
             st.session_state.price_data = None
             st.session_state.computed_results = None
-        if not results:
-            st.warning("No funds found. Try a different search term.")
+            if not results:
+                st.warning("No funds found. Try a different search term.")
 
     if not st.session_state.search_results and not st.session_state.selected_fund:
         st.markdown("**Try these popular funds:**")
         suggestion_cols = st.columns(6)
-        suggestions = ["ICICI Prudential FlexiCap", "Parag Parikh Flexi Cap", "HDFC Mid Cap", "SBI Small Cap", "Axis Bluechip", "Mirae Asset Large Cap"]
+        suggestions = ["ICICI Prudential Flexi Cap", "Parag Parikh Flexi Cap", "HDFC Mid Cap", "SBI Small Cap", "Axis Bluechip", "Mirae Asset Large Cap"]
         for i, suggestion in enumerate(suggestions):
             col = suggestion_cols[i % 6]
             if col.button(suggestion, key=f"sugg_{i}"):
@@ -219,12 +219,12 @@ with tab_search:
                     st.session_state.selected_fund = None
                     st.session_state.holdings_data = None
                     st.session_state.computed_results = None
-                st.rerun()
+                    st.rerun()
 
     if st.session_state.search_results and not st.session_state.selected_fund:
-        st.markdown(f"#### Found {len(st.session_state.search_results)} matching funds")
+        st.markdown(f"### Found {len(st.session_state.search_results)} matching funds")
         st.caption("Click a fund below to analyze it")
-        fund_options = [(r["scheme_name"], r["scheme_code"]) for r in st.session_state.search_results]
+        fund_options = [([r["scheme_name"], r["scheme_code"]]) for r in st.session_state.search_results]
         for idx, (label, code) in enumerate(fund_options):
             col_name, col_btn2 = st.columns([5, 1])
             with col_name:
@@ -236,7 +236,7 @@ with tab_search:
                     st.session_state.price_data = None
                     st.session_state.computed_results = None
                     st.rerun()
-        st.markdown("---")
+            st.markdown("---")
 
     if st.session_state.selected_fund:
         fund = st.session_state.selected_fund
@@ -261,16 +261,16 @@ with tab_search:
         if st.session_state.holdings_data is None:
             with st.spinner("Fetching portfolio holdings..."):
                 holdings, source, holdings_date = fetch_holdings(fund_name, fund_code)
-            if holdings:
-                st.session_state.holdings_data = holdings
-                st.session_state.holdings_source = source
-                st.session_state.holdings_date = holdings_date
-                date_info = f" (as of {holdings_date})" if holdings_date else ""
-                st.success(f"Found {len(holdings)} holdings (Source: {source}{date_info})")
-            else:
-                st.error("Could not fetch holdings.")
-                with st.expander("Technical details (click to expand)", expanded=False):
-                    st.code(source, language="text")
+                if holdings:
+                    st.session_state.holdings_data = holdings
+                    st.session_state.holdings_source = source
+                    st.session_state.holdings_date = holdings_date
+                    date_info = f" (as of {holdings_date})" if holdings_date else ""
+                    st.success(f"Found {len(holdings)} holdings (Source: {source}{date_info})")
+                else:
+                    st.error("Could not fetch holdings.")
+                    with st.expander("Technical details (click to expand)", expanded=False):
+                        st.code(source, language="text")
 
         if st.session_state.holdings_data:
             holdings = st.session_state.holdings_data
@@ -290,82 +290,81 @@ with tab_search:
                             ticker_map[h["name"]] = ticker
                         else:
                             unresolved.append(h["name"])
-                if unresolved:
-                    st.warning(f"Could not resolve tickers for {len(unresolved)} holdings: {', '.join(unresolved[:5])}{'...' if len(unresolved) > 5 else ''}")
-                resolved_holdings = [h for h in equity_holdings if h["name"] in ticker_map]
-                if resolved_holdings:
-                    all_tickers = list(set(ticker_map.values()))
-                    with st.spinner(f"Fetching today's prices for {len(all_tickers)} stocks..."):
-                        price_data = fetch_price_changes(all_tickers)
-                    st.session_state.price_data = price_data
-                    results = []
-                    total_weight_used = 0
-                    total_weight_unresolved = 0
-                    for h in equity_holdings:
-                        name = h["name"]
-                        weight = h["weight"]
-                        ticker = ticker_map.get(name)
-                        if ticker and ticker in price_data:
-                            pd_data = price_data[ticker]
-                            change_pct = pd_data["change_pct"]
-                            contribution = (weight / 100) * change_pct
-                            total_weight_used += weight
-                            results.append({"name": name, "ticker": ticker, "weight": weight, "change_pct": change_pct, "contribution": contribution, "prev_close": pd_data["prev_close"], "curr_price": pd_data["curr_price"]})
-                        else:
-                            total_weight_unresolved += weight
-                    if results:
-                        total_estimated_return = sum(r["contribution"] for r in results)
-                        coverage = total_weight_used / (total_weight_used + total_weight_unresolved) * 100 if (total_weight_used + total_weight_unresolved) > 0 else 0
-                        if total_estimated_return >= 0:
-                            st.success(f"Estimated Today's Return: +{total_estimated_return:.4f}%")
-                        else:
-                            st.error(f"Estimated Today's Return: {total_estimated_return:.4f}%")
-                        st.caption(f"Based on {len(results)} resolved holdings covering {coverage:.1f}% of portfolio weight.")
+                    if unresolved:
+                        st.warning(f"Could not resolve tickers for {len(unresolved)} holdings: {', '.join(unresolved[:5])}{'...' if len(unresolved) > 5 else ''}")
+                    resolved_holdings = [h for h in equity_holdings if h["name"] in ticker_map]
+                    if resolved_holdings:
+                        all_tickers = list(set(ticker_map.values()))
+                        with st.spinner(f"Fetching today's prices for {len(all_tickers)} stocks..."):
+                            price_data = fetch_price_changes(all_tickers)
+                            st.session_state.price_data = price_data
+                            results = []
+                            total_weight_used = 0
+                            total_weight_unresolved = 0
+                            for h in equity_holdings:
+                                name = h["name"]
+                                weight = h["weight"]
+                                ticker = ticker_map.get(name)
+                                if ticker and ticker in price_data:
+                                    pd_data = price_data[ticker]
+                                    change_pct = pd_data["change_pct"]
+                                    contribution = (weight / 100) * change_pct
+                                    total_weight_used += weight
+                                    results.append({"name": name, "ticker": ticker, "weight": weight, "change_pct": change_pct, "contribution": contribution, "prev_close": pd_data["prev_close"], "curr_price": pd_data["curr_price"]})
+                                else:
+                                    total_weight_unresolved += weight
+                            if results:
+                                total_estimated_return = sum(r["contribution"] for r in results)
+                                coverage = total_weight_used / (total_weight_used + total_weight_unresolved) * 100 if (total_weight_used + total_weight_unresolved) > 0 else 0
+                                if total_estimated_return >= 0:
+                                    st.success(f"Estimated Today's Return: +{total_estimated_return:.4f}%")
+                                else:
+                                    st.error(f"Estimated Today's Return: {total_estimated_return:.4f}%")
+                                st.caption(f"Based on {len(results)} resolved holdings covering {coverage:.1f}% of portfolio weight.")
 
-                        col_pos, col_neg = st.columns(2)
-                        with col_pos:
-                            st.markdown("#### Top Positive Contributors")
-                            pos = sorted([(r["name"], r["contribution"]) for r in results if r["contribution"] > 0], key=lambda x: x[1], reverse=True)
-                            for name, contrib in pos[:5]:
-                                st.markdown(f"**{name}**: +{contrib:.4f}%")
-                        with col_neg:
-                            st.markdown("#### Top Negative Contributors")
-                            neg = sorted([(r["name"], r["contribution"]) for r in results if r["contribution"] < 0], key=lambda x: x[1])
-                            for name, contrib in neg[:5]:
-                                st.markdown(f"**{name}**: {contrib:.4f}%")
+                                col_pos, col_neg = st.columns(2)
+                                with col_pos:
+                                    st.markdown("#### Top Positive Contributors")
+                                    pos = sorted([(r["name"], r["contribution"]) for r in results if r["contribution"] > 0], key=lambda x: x[1], reverse=True)
+                                    for name, contrib in pos[:5]:
+                                        st.markdown(f"**{name}**: +{contrib:.4f}%")
+                                with col_neg:
+                                    st.markdown("#### Top Negative Contributors")
+                                    neg = sorted([(r["name"], r["contribution"]) for r in results if r["contribution"] < 0], key=lambda x: x[1])
+                                    for name, contrib in neg[:5]:
+                                        st.markdown(f"**{name}**: {contrib:.4f}%")
 
-                        results_df = pd.DataFrame(results)
-                        results_df = results_df[["name", "ticker", "weight", "prev_close", "curr_price", "change_pct", "contribution"]].rename(columns={
-                            "name": "Company", "ticker": "Ticker", "weight": "Weight (%)",
-                            "prev_close": "Prev Close", "curr_price": "Current Price",
-                            "change_pct": "Change (%)", "contribution": "Contribution",
-                        })
-                        results_df = results_df.sort_values("Contribution", ascending=False)
-                        st.markdown("#### Detailed Breakdown")
-                        st.dataframe(results_df, use_container_width=True, hide_index=True, column_config={
-                            "Weight (%)": st.column_config.NumberColumn(format="%.2f%%"),
-                            "Change (%)": st.column_config.NumberColumn(format="%.2f%%"),
-                            "Contribution": st.column_config.NumberColumn(format="%.4f%%"),
-                        })
-                        top15 = results_df.head(15)
-                        fig_water = go.Figure(go.Waterfall(
-                            x=top15["Company"], y=top15["Contribution"], orientation="v",
-                            connector={"line": {"color": "#ccc"}},
-                            increasing={"marker": {"color": "#10b981"}},
-                            decreasing={"marker": {"color": "#ef4444"}},
-                        ))
-                        _tmpl = "plotly_dark" if st.session_state.get("theme_mode") == "Dark" else "plotly_white"
-                        fig_water.update_layout(title="Contribution Waterfall (Top 15 by Impact)", yaxis_title="Contribution (%)", height=400, margin=dict(l=20, r=20, t=40, b=80), template=_tmpl)
-                        fig_water.update_xaxes(tickangle=45)
-                        st.plotly_chart(fig_water, use_container_width=True)
+                                results_df = pd.DataFrame(results)
+                                results_df = results_df[["name", "ticker", "weight", "prev_close", "curr_price", "change_pct", "contribution"]].rename(columns={
+                                    "name": "Company", "ticker": "Ticker", "weight": "Weight (%)",
+                                    "prev_close": "Prev Close", "curr_price": "Current Price", "change_pct": "Change (%)", "contribution": "Contribution",
+                                })
+                                results_df = results_df.sort_values("Contribution", ascending=False)
+                                st.markdown("### Detailed Breakdown")
+                                st.dataframe(results_df, use_container_width=True, hide_index=True, column_config={
+                                    "Weight (%)": st.column_config.NumberColumn(format="%.2f%%"),
+                                    "Change (%)": st.column_config.NumberColumn(format="%.2f%%"),
+                                    "Contribution": st.column_config.NumberColumn(format="%.4f%%"),
+                                })
+                                top15 = results_df.head(15)
+                                fig_water = go.Figure(go.Waterfall(
+                                    x=top15["Company"], y=top15["Contribution"], orientation="v",
+                                    connector={"line": {"color": "#ccc"}},
+                                    increasing={"marker": {"color": "#10b981"}},
+                                    decreasing={"marker": {"color": "#ef4444"}},
+                                ))
+                                _tmpl = "plotly_dark" if st.session_state.get("theme_mode") == "Dark" else "plotly_white"
+                                fig_water.update_layout(title="Contribution Waterfall (Top 15 by Impact)", yaxis_title="Contribution (%)", height=400, margin=dict(l=20, r=20, t=40, b=80), template=_tmpl)
+                                fig_water.update_xaxes(tickangle=45)
+                                st.plotly_chart(fig_water, use_container_width=True)
 
-            st.markdown("---")
-            nav_float = None
-            try:
-                nav_float = float(nav_val) if nav_val else None
-            except (ValueError, TypeError):
-                pass
-            render_fund_detail(fund_name, fund_code, holdings, st.session_state.holdings_source, holdings_date, nav_float, None, None)
+                st.markdown("---")
+                nav_float = None
+                try:
+                    nav_float = float(nav_val) if nav_val else None
+                except (ValueError, TypeError):
+                    pass
+                render_fund_detail(fund_name, fund_code, holdings, st.session_state.holdings_source, holdings_date, nav_float, None, None)
 
     if not st.session_state.search_results and not st.session_state.selected_fund:
         st.markdown(
@@ -421,8 +420,7 @@ with tab_sheet:
             st.rerun()
 
         render_fund_detail(
-            result["name"], result.get("code", ""),
-            result.get("holdings", []), None,
+            result["name"], result.get("code", ""), result.get("holdings", []), None,
             result.get("holdings_date"), result.get("nav"),
             result.get("day_change"), result.get("return_details"),
         )
