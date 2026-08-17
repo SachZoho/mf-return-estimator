@@ -61,16 +61,25 @@ if st.session_state.theme_mode == "Dark":
     st.markdown(_s + """
     /* ===== MAIN APP BACKGROUND + HEADER BAR ===== */
     .stApp { background-color: #0e1117 !important; color: #e6edf3 !important; }
-    .stApp > header, [data-testid="stHeader"],
-    [data-testid="stToolbar"], [data-testid="stMainMenu"],
-    header[data-testid="stHeader"] {
+
+    /* Kill ALL white backgrounds in the top header bar */
+    header, [data-testid="stHeader"], [data-testid="stToolbar"],
+    [data-testid="stMainMenu"], [data-testid="stHeader"] > div,
+    [data-testid="stToolbar"] > div, [data-testid="stHeader"] div,
+    [data-testid="stToolbar"] div, [data-testid="stMainMenu"] div {
         background-color: #0e1117 !important;
         color: #e6edf3 !important;
     }
-    [data-testid="stHeader"] * { color: #e6edf3 !important; }
-    [data-testid="stToolbar"] * { color: #e6edf3 !important; }
-    [data-testid="stMainMenu"] svg { fill: #e6edf3 !important; color: #e6edf3 !important; }
-    [data-testid="stHeader"] svg { fill: #e6edf3 !important; color: #e6edf3 !important; }
+    header *, [data-testid="stHeader"] *,
+    [data-testid="stToolbar"] *, [data-testid="stMainMenu"] * {
+        background-color: #0e1117 !important;
+        color: #e6edf3 !important;
+    }
+    header svg, [data-testid="stHeader"] svg,
+    [data-testid="stToolbar"] svg, [data-testid="stMainMenu"] svg {
+        fill: #e6edf3 !important;
+        color: #e6edf3 !important;
+    }
 
     /* ===== ALL TEXT ELEMENTS ===== */
     .stApp, .stApp p, .stApp span, .stApp li, .stApp strong,
