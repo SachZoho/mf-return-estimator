@@ -60,7 +60,8 @@ _detected_theme = st.query_params.get("st_theme", "light")
 st.session_state["theme_mode"] = "Dark" if _detected_theme == "dark" else "Light"
 
 # Show app title in Streamlit's own header bar, left side, stays while scrolling
-# Also hide Fork/GitHub button, Streamlit profile links, and "hosted by" text
+# Also hide Fork/GitHub button and Streamlit footer/profile links
+# IMPORTANT: Keep the three-dot menu (stMainMenu) visible - it has theme selector
 _lt = chr(60)
 st.markdown(_lt + "style" + chr(62) +
     # Title in header bar - gradient blue/purple for attractiveness
@@ -76,24 +77,60 @@ st.markdown(_lt + "style" + chr(62) +
     ' -webkit-text-fill-color: transparent;'
     ' background-clip: text;'
     ' }'
-    # Hide Fork button + GitHub repo link in header
-    ' [data-testid="stGithubFork"], [data-testid="stGitFork"], '
-    ' [data-testid="stHeaderRepoLink"], .stGithubFork, '
-    ' a[href*="github.com"].st-ae {'
+    # Hide Fork button + GitHub repo link in header (keep three-dot menu!)
+    ' [data-testid="stHeaderContent"] a[href*="github"], '
+    ' [data-testid="stHeaderContent"] a[href*="fork"], '
+    ' [data-testid="stHeader"] a[target="_blank"], '
+    ' .stGithubFork, '
+    ' [data-testid="stGitFork"], '
+    ' [data-testid="stGithubFork"] {'
     ' display: none !important;'
     ' }'
     # Hide Streamlit profile button + hosted-by text at bottom right
-    ' [data-testid="stProfileLink"], [data-testid="stMainMenu"], '
+    ' [data-testid="stProfileLink"], '
     ' .stProfileLink, [data-testid="stStatusWidget"], '
-    ' footer [data-testid="stMarkdownContainer"] {'
+    ' footer [data-testid="stMarkdownContainer"], '
+    ' .stDeployButton, [data-testid="stDeployButton"] {'
     ' display: none !important;'
     ' }'
     # Hide the streamlit footer entirely
-    ' footer, .stFooter, [data-testid="stFooter"] {'
+    ' footer, .stFooter, [data-testid="stFooter"], '
+    ' [data-testid="stBottom"] {'
     ' display: none !important;'
     ' }'
     + _lt + "/style" + chr(62),
     unsafe_allow_html=True)
+
+# Also use JS to remove Fork/GitHub link and footer (CSS alone may not catch all)
+components.html("""
+<script>
+function cleanup() {
+    try {
+        var doc = window.parent.document;
+        // Remove Fork button and GitHub repo link from header
+        var headerLinks = doc.querySelectorAll('[data-testid="stHeader"] a, [data-testid="stHeaderContent"] a');
+        headerLinks.forEach(function(a) {
+            var href = (a.href || '').toLowerCase();
+            var text = (a.textContent || '').toLowerCase();
+            if (href.indexOf('github') >= 0 || text.indexOf('fork') >= 0) {
+                a.style.display = 'none';
+            }
+        });
+        // Remove footer / profile / deploy buttons
+        var footer = doc.querySelector('footer');
+        if (footer) footer.style.display = 'none';
+        var profile = doc.querySelector('[data-testid="stProfileLink"]');
+        if (profile) profile.style.display = 'none';
+        var status = doc.querySelector('[data-testid="stStatusWidget"]');
+        if (status) status.style.display = 'none';
+        var bottom = doc.querySelector('[data-testid="stBottom"]');
+        if (bottom) bottom.style.display = 'none';
+    } catch(e) {}
+}
+cleanup();
+setInterval(cleanup, 1000);
+</script>
+""", height=0, width=0)
 
 tab_search, tab_sheet = st.tabs(["Search MF", "Load from Sheet"])
 
