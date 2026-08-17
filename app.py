@@ -19,6 +19,58 @@ from stock_data import resolve_ticker, fetch_price_changes
 from mf_helpers import compute_fund_return, render_fund_detail
 
 
+st.set_page_config(
+    page_title="MF Return Estimator",
+    page_icon="chart_with_upwards_trend",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# Theme state
+if "theme_mode" not in st.session_state:
+    st.session_state.theme_mode = "Light"
+
+# Title + theme toggle (top right)
+col_title, col_theme = st.columns([7, 1])
+with col_title:
+    st.title("MF Return Estimator")
+    st.caption("Estimate today's mutual fund return from underlying stock holdings")
+with col_theme:
+    st.markdown("&nbsp;")
+    _tm = st.radio("Mode", ["Light", "Dark"], horizontal=True, key="theme_radio", label_visibility="collapsed")
+    st.session_state.theme_mode = _tm
+
+# Inject CSS for theme using chr() to avoid HTML tag stripping
+_lt = chr(60) + "style" + chr(62)
+_le = chr(60) + "/style" + chr(62)
+
+if st.session_state.theme_mode == "Dark":
+    st.markdown(_lt + """
+    .stApp { background-color: #0e1117; color: #fafafa; }
+    .stApp p, .stApp span, .stApp li, .stApp strong { color: #fafafa !important; }
+    .stApp .stMetric label { color: #8b949e !important; }
+    .stApp .stMetric [data-testid="stMetricValue"] { color: #fafafa !important; }
+    .stApp [data-testid="stSidebar"] { background-color: #161b22; }
+    .stApp [data-testid="stSidebar"] * { color: #c9d1d9 !important; }
+    .stApp .stTabs [data-baseweb="tab"] { color: #8b949e; }
+    .stApp .stTabs [aria-selected="true"] { color: #fafafa !important; }
+    .stApp [data-testid="stExpander"] { background-color: #161b22; border-color: #30363d !important; }
+    .stApp [data-testid="stExpander"] * { color: #c9d1d9; }
+    .stApp .stAlert { background-color: #161b22 !important; }
+    .stApp .stAlert * { color: #c9d1d9 !important; }
+    .stApp [data-testid="stDataFrame"] { background-color: #161b22; }
+    .stApp input, .stApp textarea { background-color: #0d1117 !important; color: #fafafa !important; }
+    .stApp [data-baseweb="select"] > div { background-color: #161b22 !important; }
+    .stApp [data-baseweb="base-input"] { background-color: #0d1117 !important; }
+    .stApp hr { border-color: #30363d !important; }
+    .stApp [data-testid="stVerticalBlock"] > div { color: #c9d1d9; }
+    """ + _le, unsafe_allow_html=True)
+else:
+    st.markdown(_lt + """
+    .stApp { background-color: #ffffff; color: #262730; }
+    """ + _le, unsafe_allow_html=True)
+
+
 tab_search, tab_sheet = st.tabs(["Search MF", "Load from Sheet"])
 
 
@@ -216,7 +268,8 @@ with tab_search:
                             increasing={"marker": {"color": "#10b981"}},
                             decreasing={"marker": {"color": "#ef4444"}},
                         ))
-                        fig_water.update_layout(title="Contribution Waterfall (Top 15 by Impact)", yaxis_title="Contribution (%)", height=400, margin=dict(l=20, r=20, t=40, b=80))
+                        _tmpl = "plotly_dark" if st.session_state.get("theme_mode") == "Dark" else "plotly_white"
+                        fig_water.update_layout(title="Contribution Waterfall (Top 15 by Impact)", yaxis_title="Contribution (%)", height=400, margin=dict(l=20, r=20, t=40, b=80), template=_tmpl)
                         fig_water.update_xaxes(tickangle=45)
                         st.plotly_chart(fig_water, use_container_width=True)
 
