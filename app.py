@@ -28,7 +28,7 @@ st.set_page_config(
 st.title("MF Return Estimator")
 st.caption("Load mutual funds from a Google Sheet and see today's estimated returns")
 
-# ------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 # Session state
 # -----------------------------------------------------------------------
 if "sheet_url" not in st.session_state:
@@ -41,7 +41,7 @@ if "detail_fund_idx" not in st.session_state:
     st.session_state.detail_fund_idx = None
 
 
-# ------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 # Helper: compute estimated return for one fund
 # -----------------------------------------------------------------------
 def compute_fund_return(holdings):
@@ -84,9 +84,9 @@ def compute_fund_return(holdings):
     return total_return, details
 
 
-# ------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 # Helper: load MFs from Google Sheet
-# ------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 def load_mfs_from_sheet(url):
     """Extract sheet ID, read 'mf' tab, return list of {name, code}."""
     match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", url)
@@ -132,7 +132,7 @@ def load_mfs_from_sheet(url):
 
 # -----------------------------------------------------------------------
 # DETAIL VIEW
-# ----------------------------------------------------------------------
+# -----------------------------------------------------------------------
 if st.session_state.detail_fund_idx is not None and st.session_state.mf_results:
     idx = st.session_state.detail_fund_idx
     results = st.session_state.mf_results
@@ -218,7 +218,7 @@ if st.session_state.detail_fund_idx is not None and st.session_state.mf_results:
                 color_discrete_sequence=px.colors.qualitative.Set3,
             )
             fig_pie.update_traces(textposition="inside", textinfo="percent+label", textfont_size=11)
-            fig_pie.update_layout(height=400, showlegdend=False, margin=dict(l=10, r=10, t=10, b=10))
+            fig_pie.update_layout(height=400, showlegend=False, margin=dict(l=10, r=10, t=10, b=10))
             st.plotly_chart(fig_pie, use_container_width=True)
         with col_table:
             st.markdown("**Sector Breakdown**")
@@ -269,16 +269,16 @@ if st.session_state.detail_fund_idx is not None and st.session_state.mf_results:
                 yaxis_title="Contribution (%)", height=400,
                 margin=dict(l=20, r=20, t=40, b=80),
             )
-            fig_water.update_xapes(tickangle=45)
+            fig_water.update_xaxes(tickangle=45)
             st.plotly_chart(fig_water, use_container_width=True)
 
     st.divider()
     st.caption("MF Return Estimator | Data: Google Sheets, mfapi.in, FinAPI, AMFI Portal, Yahoo Finance")
 
 
-# ------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 # SUMMARY VIEW
-# --------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 else:
 
     # --- Step 1: Load MFs from Google Sheet ---
@@ -371,7 +371,7 @@ else:
                     holdings, source, holdings_date = fetch_holdings(mf["name"], scheme_code)
                     if holdings:
                         result["holdings"] = holdings
-                        result["holdings_count"] = len$holdings)
+                        result["holdings_count"] = len(holdings)
                         result["holdings_date"] = holdings_date
 
                         # Compute estimated return
@@ -412,7 +412,7 @@ else:
                 })
             summary_df = pd.DataFrame(summary_rows)
 
-            # Color-code Day Change column
+            # Display summary table
             st.dataframe(
                 summary_df,
                 use_container_width=True,
@@ -458,7 +458,7 @@ else:
             with col_s2:
                 avg_change_vals = [r["day_change"] for r in results if r.get("day_change") is not None]
                 avg_change = sum(avg_change_vals) / len(avg_change_vals) if avg_change_vals else 0
-                st.metric("Avg Day Change", f"{avg_change:+-4f}%")
+                st.metric("Avg Day Change", f"{avg_change:+.4f}%")
             with col_s3:
                 gainers = sum(1 for v in avg_change_vals if v > 0)
                 st.metric("Gainers", gainers)
