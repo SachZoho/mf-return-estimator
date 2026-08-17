@@ -38,6 +38,8 @@ if "holdings_data" not in st.session_state:
     st.session_state.holdings_data = None
 if "holdings_source" not in st.session_state:
     st.session_state.holdings_source = None
+if "holdings_date" not in st.session_state:
+    st.session_state.holdings_date = None
 if "price_data" not in st.session_state:
     st.session_state.price_data = None
 if "computed_results" not in st.session_state:
@@ -139,23 +141,25 @@ if st.session_state.selected_fund:
 
     if st.session_state.holdings_data is None:
         with st.spinner("Fetching portfolio holdings..."):
-            holdings, source = fetch_holdings(fund_name, fund_code)
+            holdings, source, holdings_date = fetch_holdings(fund_name, fund_code)
         if holdings:
             st.session_state.holdings_data = holdings
             st.session_state.holdings_source = source
-            st.success(f"Found {len(holdings)} holdings (Source: {source})")
+            st.session_state.holdings_date = holdings_date
+            date_info = f" (as of {holdings_date})" if holdings_date else ""
+            st.success(f"Found {len(holdings)} holdings (Source: {source}{date_info})")
         else:
             st.error("Could not fetch holdings.")
             with st.expander("Technical details (click to expand)", expanded=False):
                 st.code(source, language="text")
-            st.warning("The app tried multiple data sources (FinAPI, mfdata.in, Groww) but none returned holdings. This could be a temporary network issue. Please try again in a moment, or try a different fund.")
+            st.warning("The app tried multiple data sources (AMFI Portal, FinAPI, mfdata.in, Groww) but none returned holdings. This could be a temporary network issue. Please try again in a moment, or try a different fund.")
 
     if st.session_state.holdings_data:
         holdings = st.session_state.holdings_data
         equity_holdings = [h for h in holdings if h.get("instrument", "").lower() in ["equity", "stock", "foreign equity"]]
         non_equity = [h for h in holdings if h.get("instrument", "").lower() not in ["equity", "stock", "foreign equity"]]
 
-        col_a, col_b, col_c, col_d = st.columns(4)
+        col_a, col_b, col_c, col_d, col_e = st.columns(5)
         with col_a:
             st.metric("Total Holdings", len(holdings))
         with col_b:
@@ -165,6 +169,9 @@ if st.session_state.selected_fund:
         with col_d:
             total_equity_weight = sum(h["weight"] for h in equity_holdings)
             st.metric("Equity Exposure", f"{total_equity_weight:.1f}%")
+        with col_e:
+            holdings_date = st.session_state.get("holdings_date")
+            st.metric("Holdings As Of", holdings_date or "Unknown")
 
         st.markdown("#### Top 10 Holdings by Weight")
         top10 = sorted(holdings, key=lambda x: x["weight"], reverse=True)[:10]
