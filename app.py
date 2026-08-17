@@ -17,6 +17,7 @@ from collections import defaultdict
 from mf_data import search_funds, fetch_holdings, get_fund_nav, get_fund_meta
 from stock_data import resolve_ticker, fetch_price_changes
 from mf_helpers import compute_fund_return, render_fund_detail
+from index_data import render_index_bar
 
 
 st.set_page_config(
@@ -154,6 +155,9 @@ setInterval(cleanup, 1000);
 """, height=0, width=0)
 
 tab_search, tab_sheet = st.tabs(["Search MF", "Load from Sheet"])
+
+# Show market index bar (Nifty 50, Sensex, etc.) between header and tabs
+render_index_bar()
 
 
 
