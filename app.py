@@ -89,7 +89,17 @@ st.session_state["theme_mode"] = "Dark" if _detected_theme == "dark" else "Light
 # chr(60)-based st.markdown call produced a malformed opening tag and the
 # CSS leaked onto the page as visible text.
 components.html("""
-<style>
+<script>
+(function () {
+    // components.html() renders inside an IFRAME, so a plain <style> tag here
+    // cannot reach the parent document's [data-testid="stHeader"] element.
+    // Inject the <style> into the PARENT document's <head> so the header title
+    // ::before rule and the Fork/GitHub/footer hiding rules actually apply.
+    var doc = window.parent.document;
+    if (doc.getElementById('mf-header-style')) return;
+    var style = doc.createElement('style');
+    style.id = 'mf-header-style';
+    style.textContent = `
 [data-testid="stHeader"]::before {
     content: "MF Return Estimator";
     font-size: 1.15rem;
@@ -123,7 +133,10 @@ footer, .stFooter, [data-testid="stFooter"],
 [data-testid="stBottom"] {
     display: none !important;
 }
-</style>
+`;
+    doc.head.appendChild(style);
+})();
+</script>
 """, height=0, width=0)
 
 # Also use JS to remove Fork/GitHub link and footer (CSS alone may not catch all)
@@ -163,10 +176,9 @@ render_index_bar()
 tab_search, tab_sheet = st.tabs(["Search MF", "Load from Sheet"])
 
 
-
-# =======================================================================
+# =============================================================================
 # TAB 1: Search MF (original flow)
-# =======================================================================
+# =============================================================================
 
 with tab_search:
     st.info(
@@ -227,7 +239,7 @@ with tab_search:
     if st.session_state.search_results and not st.session_state.selected_fund:
         st.markdown(f"### Found {len(st.session_state.search_results)} matching funds")
         st.caption("Click a fund below to analyze it")
-        fund_options = [([r["scheme_name"], r["scheme_code"]]) for r in st.session_state.search_results]
+        fund_options = [([r["scheme_name"], [r["scheme_code"]]]) for r in st.session_state.search_results]
         for idx, (label, code) in enumerate(fund_options):
             col_name, col_btn2 = st.columns([5, 1])
             with col_name:
@@ -398,9 +410,9 @@ with tab_search:
         )
 
 
-# =======================================================================
+# =============================================================================
 # TAB 2: Load from Sheet
-# =======================================================================
+# =============================================================================
 
 with tab_sheet:
     if "sheet_mf_list" not in st.session_state:
