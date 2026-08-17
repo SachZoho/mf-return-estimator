@@ -1,9 +1,19 @@
 """
-Stock data module — resolves Indian stock names to NSE tickers
+Stock data module — resolves Indian and foreign stock names to tickers
 and fetches current-day price changes via yfinance.
 
-Uses NSE's official EQUITY_L.csv (2,400+ companies) for comprehensive
-ticker resolution with fuzzy matching, instead of a hardcoded dictionary.
+Uses NSE's official EQUITY_L.csv (2,500+ companies) for Indian stock
+resolution, plus a foreign-stock map for US/global stocks commonly held
+by Indian mutual funds (Alphabet, Microsoft, Amazon, etc.).
+
+Resolution pipeline:
+1. Skip non-equity items (bonds, T-bills, futures, cash, derivatives)
+2. Check foreign stock map (US/global stocks)
+3. Check REIT map (Embassy, Brookfield, Mindspace)
+4. Exact match on normalized name
+5. Exact match on token set
+6. Fuzzy match (SequenceMatcher + token-set Jaccard), threshold 0.60
+7. yfinance search API fallback
 """
 
 import re
@@ -28,317 +38,480 @@ _NSE_EQUITY_URL = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
 
 _nse_companies: Optional[List[Dict]] = None
 _exact_map: Optional[Dict[str, str]] = None
+_token_map: Optional[Dict[frozenset, str]] = None
 
 
-# Common aliases that don't match NSE's exact naming
-_ALIAS_MAP = {
-    "icici bank": "ICICIBANK", "hdfc bank": "HDFCBANK", "state bank of india": "SBIN",
-    "axis bank": "AXISBANK", "tvs motor company": "TVSMOTOR",
-    "maruti suzuki india": "MARUTI", "maruti suzuki": "MARUTI",
-    "avenue supermarts": "DMART", "larsen & toubro": "LT", "larsen and toubro": "LT",
-    "mahindra & mahindra": "M&M", "mahindra and mahindra": "M&M",
-    "tata consultancy services": "TCS", "bharat petroleum": "BPCL",
-    "hindustan petroleum": "HINDPETRO", "oil & natural gas corporation": "ONGC",
-    "oil and natural gas corporation": "ONGC", "zomato": "ETERNAL", "eternal": "ETERNAL",
-    "divi's laboratories": "DIVISLAB", "divis laboratories": "DIVISLAB",
-    "dr reddy's laboratories": "DRREDDY", "dr reddys laboratories": "DRREDDY",
-    "m&m": "M&M", "bajaj-auto": "BAJAJ-AUTO", "bajaj auto": "BAJAJ-AUTO",
-    "sona blw precision": "SONACOMS", "sona blw precision forgings": "SONACOMS",
-    "sundaram-clayton": "SCLT", "sundaram clayton": "SCLT",
-    "sundaram - clayton dcd": "SCLT", "samvardhana motherson": "MOTHERSON",
-    "samvardhana motherson international": "MOTHERSON", "motherson sumi wiring": "MSUMI",
-    "fsn e-commerce ventures": "NYKAA", "fsn e-commerce": "NYKAA", "nykaa": "NYKAA",
-    "interglobe aviation": "INDIGO", "interglob aviation": "INDIGO",
-    "jindal steel & power": "JINDALSTEL", "jindal steel and power": "JINDALSTEL",
-    "ratnamani metals & tubes": "RATNAMANI", "ratnamani metals and tubes": "RATNAMANI",
-    "ge t&d india": "GET&D", "multi commodity exchange of india": "MCEVENT",
-    "multi commodity exchange": "MCEVENT", "the federal bank": "FEDERALBNK",
-    "federal bank": "FEDERALBNK", "punjab national bank": "PNB",
-    "bank of baroda": "BANKBARODA", "canara bank": "CANBK", "idbi bank": "IDBI",
-    "rbl bank": "RBLBANK", "bandhan bank": "BANDHANBNK",
-    "au small finance bank": "AUBANK", "indusind bank": "INDUSINDBK",
-    "yes bank": "YESBANK", "kotak mahindra bank": "KOTAKBANK",
-    "tata steel": "TATASTEEL", "tata motors": "TATAMOTORS", "tata power": "TATAPOWER",
-    "tata consumer products": "TATACONSUM", "tata chemicals": "TATACHEM",
-    "tata investment corporation": "TATAINVEST", "tata technologies": "TATATECH",
-    "tata elxsi": "TATAELXSI", "reliance industries": "RELIANCE",
-    "hindustan unilever": "HINDUNILVR", "hindustan zinc": "HINDZINC",
-    "coal india": "COALINDIA", "indian oil corporation": "IOC",
-    "gail india": "GAIL", "ntpc": "NTPC", "power grid corporation": "POWERGRID",
-    "adani green energy": "ADANIGREEN", "adani power": "ADANIPOWER",
-    "adani enterprises": "ADANIENT", "adani total gas": "ATGL",
-    "adani wilmar": "AWL", "varun beverages": "VBL",
-    "godrej consumer products": "GODREJCP", "godrej properties": "GODREJPROP",
-    "dabur india": "DABUR", "nestle india": "NESTLEIND", "itc": "ITC",
-    "wipro": "WIPRO", "infosys": "INFY", "tech mahindra": "TECHM",
-    "hcl technologies": "HCLTECH", "ltimindtree": "LTIM", "lti mindtree": "LTIM",
-    "mphasis": "MPHASIS", "coforge": "COFORGE",
-    "persistent systems": "PERSISTENT", "bharti airtel": "BHARTIARTL",
-    "sun pharmaceutical": "SUNPHARMA", "sun pharma": "SUNPHARMA",
-    "cipla": "CIPLA", "apollo hospitals": "APOLLOHOSP",
-    "max healthcare": "MAXHEALTH", "max financial services": "MFSL",
-    "sbi life insurance": "SBILIFE", "hdfc life insurance": "HDFCLIFE",
-    "hdfc asset management": "HDFCAMC",
-    "icici prudential life insurance": "ICICIPRULI",
-    "icici lombard": "ICICIGI",
-    "life insurance corporation of india": "LICI", "lic of india": "LICI",
-    "bajaj finance": "BAJFINANCE", "bajaj finserv": "BAJAJFINSV",
-    "bajaj holdings & investment": "BAJAJHLDNG",
-    "bajaj holdings and investment": "BAJAJHLDNG",
-    "shriram finance": "SHRIRAMFIN", "muthoot finance": "MUTHOOTFIN",
-    "cholamandalam investment & finance": "CHOLAFIN",
-    "cholamandalam investment and finance": "CHOLAFIN",
-    "pb fintech": "POLICYBZR", "360 one wam": "360ONE",
-    "iifl wealth management": "IIFLWAM",
-    "prudent corporate advisory services": "PRUDENT",
-    "ultratech cement": "ULTRACEMCO", "shree cement": "SHREECEM",
-    "grasim industries": "GRASIM", "ambuja cements": "AMBUJACEM",
-    "jsw steel": "JSWSTEEL", "hindalco industries": "HINDALCO",
-    "hindalco": "HINDALCO", "vedanta": "VEDL", "vedanta ltd": "VEDL",
-    "national aluminium": "NATIONALUM", "apar industries": "APARIND",
-    "pi industries": "PIIND", "upl": "UPL", "srf": "SRF",
-    "century plyboards": "CENTURYPLY", "greenpanel industries": "GREENPANEL",
-    "asian paints": "ASIANPAINT", "berger paints": "BERGEPAINT",
-    "pidilite industries": "PIDILITIND", "deepak nitrite": "DEEPAKNTR",
-    "aarti industries": "AARTIIND", "coromandel international": "COROMANDEL",
-    "dlf": "DLF", "oberoi realty": "OBEROIRLTY", "prestige estates": "PRESTIGE",
-    "phoenix mills": "PHOENIXLTD", "trent": "TRENT",
-    "britannia industries": "BRITANNIA", "radico khaitan": "RADICO",
-    "united spirits": "UNITDSPR", "eicher motors": "EICHERMOT",
-    "bajaj auto": "BAJAJ-AUTO", "hero motocorp": "HEROMOTOCO",
-    "ashok leyland": "ASHOKLEY", "bosch": "BOSCHLTD",
-    "endurance technologies": "ENDURANCE", "marico": "MARICO",
-    "titan company": "TITAN", "titan": "TITAN",
-    "blue star": "BLUESTARCO", "siemens": "SIEMENS", "abb india": "ABB",
-    "cummins india": "CUMMINSIND",
-    "irb infrastructure developers": "IRB", "rail vikas nigam": "RVNL",
-    "irfc": "IRFC", "ircon international": "IRCON", "hudco": "HUDCO",
-    "rec": "RECLTD", "power finance corporation": "PFC",
-    "engineers india": "ENGINERSIN", "rites": "RITES",
-    "idea cellular": "IDEA", "vodafone idea": "IDEA",
-    "zee entertainment": "ZEEL", "sun tv network": "SUNTV",
-    "tips music": "TIPSMUSIC", "pvr inox": "PVRINOX",
-    "chalet hotels": "CHALET", "indraprastha gas": "IGL",
-    "mahanagar gas": "MGL", "gujarat gas": "GUJGASLTD",
-    "itd cementation india": "ITDCEM", "tejas networks": "TEJAS",
-    "aditya birla fashion": "ABFRL", "aditya birla sun life amc": "ABSLAMC",
-    "aditya birla real estate": "ABREL", "utiamc": "UTIAMC",
-    "shriram asset management": "SHRIRAMAMC",
-    "brainbees solutions": "FIRSTCRY", "firstcry": "FIRSTCRY",
-    "smartworks": "SMARTWORKS", "force motors": "FORCEMOTORS",
-    "rolex rings": "ROLEXRINGS", "pearl global industries": "PGIL",
-    "safari industries": "SAFARI", "sai silks": "KALAMANDIR",
-    "ethos": "ETHOSLTD", "redtape": "REDTAPE",
-    "lenskart solutions": "LENSKART", "crizac": "CRIZAC",
-    "kaynes technology": "KAYNES", "azad engineering": "AZAD",
-    "pg electroplast": "PGEL", "shadowfax technologies": "SHADOWFAX",
-    "travel food services": "TFS", "neuland laboratories": "NEULANDLAB",
-    "vijaya diagnostic centre": "VIJAYA", "syngene international": "SYNGENE",
-    "netweb technologies": "NETWEB", "ce info systems": "CEINFO",
-    "sagility": "SAGILITY", "tbo tek": "TBOTEK",
-    "physicswallah": "PHYSICSWALLAH", "omnitech engineering": "OMNITECH",
-    "sedemac mechatronics": "SEDEMAC",
-    "sharda motor industries": "SHARDAMOTR", "tvs holdings": "TVSHOLDINGS",
-    "motherson sumi wiring india": "MSUMI",
-    "international gemmological institute": "IGIL",
-    "lg electronics india": "LGEL", "indiamart intermesh": "INDIAMART",
-    "cartrade tech": "CARTRADE", "delhivery": "DELHIVERY",
-    "paytm": "PAYTM", "one 97 communications": "PAYTM",
-    "sonata software": "SONATSOFTW", "aegon life": "AEGON",
-    "anglo eastern": "ANGLOEAST",
+# ---------------------------------------------------------------------------
+# Foreign stocks commonly held by Indian mutual funds (US-listed)
+# yfinance returns these without any exchange suffix
+# ---------------------------------------------------------------------------
+
+FOREIGN_STOCKS = {
+    # Big tech
+    "alphabet inc class a": "GOOGL",
+    "alphabet inc class c": "GOOG",
+    "alphabet inc": "GOOGL",
+    "alphabet": "GOOGL",
+    "amazon.com inc": "AMZN",
+    "amazon com inc": "AMZN",
+    "amazon.com": "AMZN",
+    "amazon": "AMZN",
+    "microsoft corp": "MSFT",
+    "microsoft corporation": "MSFT",
+    "microsoft": "MSFT",
+    "meta platforms inc class a": "META",
+    "meta platforms inc class c": "META",
+    "meta platforms inc": "META",
+    "meta platforms": "META",
+    "meta": "META",
+    "apple inc": "AAPL",
+    "apple": "AAPL",
+    "netflix inc": "NFLX",
+    "netflix": "NFLX",
+    "nvidia corp": "NVDA",
+    "nvidia corporation": "NVDA",
+    "nvidia": "NVDA",
+    "tesla inc": "TSLA",
+    "tesla": "TSLA",
+    "oracle corp": "ORCL",
+    "oracle corporation": "ORCL",
+    "oracle": "ORCL",
+    "adobe inc": "ADBE",
+    "adobe": "ADBE",
+    "salesforce inc": "CRM",
+    "salesforce": "CRM",
+    "intel corp": "INTC",
+    "intel corporation": "INTC",
+    "intel": "INTC",
+    "cisco systems": "CSCO",
+    "cisco": "CSCO",
+    "qualcomm inc": "QCOM",
+    "qualcomm": "QCOM",
+    "broadcom inc": "AVGO",
+    "broadcom": "AVGO",
+    "advanced micro devices": "AMD",
+    "amd": "AMD",
+    "paypal holdings": "PYPL",
+    "paypal": "PYPL",
+    # Financial
+    "berkshire hathaway": "BRK-B",
+    "johnson and johnson": "JNJ",
+    "jpmorgan chase": "JPM",
+    "visa inc": "V",
+    "visa": "V",
+    "goldman sachs": "GS",
+    "bank of america": "BAC",
+    "wells fargo": "WFC",
+    "morgan stanley": "MS",
+    "hsbc holdings": "HSBC",
+    "hsbc": "HSBC",
+    # Consumer
+    "walt disney": "DIS",
+    "disney": "DIS",
+    "costco wholesale": "COST",
+    "costco": "COST",
+    "procter and gamble": "PG",
+    "coca cola": "KO",
+    "coca-cola": "KO",
+    "pepsi co": "PEP",
+    "pepsico": "PEP",
+    "mcdonald": "MCD",
+    "starbucks": "SBUX",
+    "nike": "NKE",
+    "walmart": "WMT",
+    "target": "TGT",
+    "home depot": "HD",
+    # Pharma / healthcare
+    "johnson & johnson": "JNJ",
+    "pfizer": "PFE",
+    "abbott laboratories": "ABT",
+    "merck": "MRK",
+    "eli lilly": "LLY",
+    "astrazeneca plc": "AZN",
+    "novartis ag": "NVS",
+    "sanofi sa": "SNY",
+    "nestle sa": "NSRGY",
+    "unilever plc": "UL",
+    "unilever": "UL",
+    # Other
+    "spotify technology": "SPOT",
+    "spotify": "SPOT",
+    "shopify inc": "SHOP",
+    "shopify": "SHOP",
+    "uber technologies": "UBER",
+    "uber": "UBER",
+    "airbnb inc": "ABNB",
+    "airbnb": "ABNB",
+    "snowflake inc": "SNOW",
+    "snowflake": "SNOW",
+    "palantir technologies": "PLTR",
+    "palantir": "PLTR",
+    "crowdstrike holdings": "CRWD",
+    "crowdstrike": "CRWD",
+    "sap se": "SAP",
+    "sap": "SAP",
+    "samsung electronics": "005930.KS",
+    "samsung": "005930.KS",
+    "alibaba group": "BABA",
+    "alibaba": "BABA",
+    "tencent holdings": "0700.HK",
+    "tencent": "0700.HK",
+    "toyota motor": "TM",
+    "toyota": "TM",
 }
 
 
+# ---------------------------------------------------------------------------
+# Indian REITs — not in NSE EQUITY_L.csv, listed separately
+# ---------------------------------------------------------------------------
+
+REIT_MAP = {
+    "embassy office parks": "EMBASSY.NS",
+    "embassy office parks reit": "EMBASSY.NS",
+    "embassy reit": "EMBASSY.NS",
+    "brookfield india real estate": "BIRET.NS",
+    "brookfield india real estate trust": "BIRET.NS",
+    "brookfield india reit": "BIRET.NS",
+    "brookfield reit": "BIRET.NS",
+    "mindspace business parks": "MINDSPACE.NS",
+    "mindspace business parks reit": "MINDSPACE.NS",
+    "mindspace reit": "MINDSPACE.NS",
+    "nexsquare offices": "NEXSQUARE.NS",
+    "nexsquare reit": "NEXSQUARE.NS",
+}
+
+
+# ---------------------------------------------------------------------------
+# Non-equity patterns — these should be skipped, not resolved
+# ---------------------------------------------------------------------------
+
+SKIP_PATTERNS = [
+    "cash offset", "net receivables", "net payables",
+    "t-bill", "tbill", "t bill",
+    "cblo", "commercial paper", "certificate of deposit",
+    "reverse repo", "repo",
+    "parag parikh liquid",  # internal liquid fund
+    "future on", "august 2026 future", "september 2026 future",
+    "october 2026 future", "november 2026 future",
+    "december 2026 future", "future",
+    "treasury", "trs_", "trp_",
+    "national bank for agriculture",
+    "small industries development bank",
+    "small industries dev bank",
+    "export-import bank", "export import bank",
+    "development bank",
+    "net current assets",
+    "margin money",
+    "security deposits",
+]
+
+
+def _should_skip(name: str) -> bool:
+    """Check if a holding name is non-equity (bonds, futures, cash, etc.)."""
+    nl = name.lower().strip()
+    for pattern in SKIP_PATTERNS:
+        if pattern in nl:
+            return True
+    # Date patterns like (16/10/2026) indicate bonds/T-bills
+    if re.search(r'\(\d{2}/\d{2}/\d{4}\)', name):
+        return True
+    # Named futures like "Bajaj Finance Limited August 2026 Future"
+    if re.search(r'\d{4}\s+future', nl):
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Name normalization — expand abbreviations, strip suffixes, unify format
+# ---------------------------------------------------------------------------
+
 def _normalize(name: str) -> str:
-    """Normalize a company name for lookup."""
+    """Normalize a company name for matching."""
     name = name.lower().strip()
-    for suffix in ["ltd.", "ltd", "limited", "co.", "co", "company", "corporation", "corp", "pvt.", "pvt"]:
-        name = name.replace(suffix, "")
-    name = re.sub(r'[^\w\s&-]', '', name)
+    # Remove trailing punctuation
+    name = name.rstrip(".")
+    # Remove parenthetical info like (18/09/2026) or (Formerly ...)
+    name = re.sub(r'\([^)]*\)', '', name).strip()
+    # Expand abbreviations BEFORE stripping suffixes
+    name = name.replace("corp.", "corporation").replace(" corp ", " corporation ")
+    name = name.replace("co.", "company").replace(" co ", " company ")
+    name = name.replace("pharms", "pharmaceutical")
+    name = name.replace("labs", "laboratories").replace("lab ", "laboratories ")
+    name = name.replace("tech.", "technologies").replace(" tech ", " technologies ")
+    name = name.replace("&", "and")
+    # Remove legal entity suffixes (word-boundary aware)
+    for suffix in ["ltd.", "ltd", "limited", "pvt.", "pvt", "inc.", "inc",
+                   "plc", "sa", "se", "ag", "reit", "ordinary"]:
+        name = re.sub(r'\b' + re.escape(suffix) + r'\b', '', name)
+    # Clean up residual
+    name = re.sub(r'[^\w\s-]', '', name)
     name = re.sub(r'\s+', ' ', name).strip()
     return name
 
 
-def _load_nse_companies():
-    """Fetch NSE's complete equity list and build lookup maps. Cached per session."""
-    global _nse_companies, _exact_map
-    if _nse_companies is not None and _exact_map is not None:
+def _tokenize(name: str) -> List[str]:
+    """Tokenize a normalized name into sorted tokens."""
+    return sorted(_normalize(name).split())
+
+
+def _token_set_ratio(tokens_a: List[str], tokens_b: List[str]) -> float:
+    """Jaccard-like ratio on token sets."""
+    set_a = set(tokens_a)
+    set_b = set(tokens_b)
+    if not set_a or not set_b:
+        return 0.0
+    intersection = len(set_a & set_b)
+    union = len(set_a | set_b)
+    return intersection / union
+
+
+# ---------------------------------------------------------------------------
+# NSE list loading
+# ---------------------------------------------------------------------------
+
+def _load_nse_companies() -> None:
+    """Fetch NSE EQUITY_L.csv and build lookup maps."""
+    global _nse_companies, _exact_map, _token_map
+    if _nse_companies is not None:
         return
 
-    _nse_companies = []
     _exact_map = {}
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/csv,application/csv",
-    }
+    _token_map = {}
+    _nse_companies = []
 
     try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/csv,application/octet-stream",
+        }
         resp = requests.get(_NSE_EQUITY_URL, headers=headers, timeout=15)
-        if resp.status_code == 200:
-            reader = csv.DictReader(io.StringIO(resp.text))
-            for row in reader:
-                symbol = row.get("SYMBOL", "").strip()
-                name = row.get("NAME OF COMPANY", "").strip()
-                if symbol and name:
-                    norm = _normalize(name)
-                    _nse_companies.append({"symbol": symbol, "name": name, "norm_name": norm})
-                    _exact_map[norm] = symbol
-                    if norm.startswith("the "):
-                        _exact_map[norm[4:]] = symbol
-    except Exception:
-        pass
+        resp.raise_for_status()
 
+        reader = csv.DictReader(io.StringIO(resp.text))
+        for row in reader:
+            symbol = row.get("SYMBOL", "").strip()
+            name = row.get("NAME OF COMPANY", "").strip()
+            if not symbol or not name:
+                continue
+            _nse_companies.append({"symbol": symbol, "name": name})
+
+            # Build exact match map (normalized name -> symbol)
+            norm = _normalize(name)
+            _exact_map[norm] = symbol
+            if norm.startswith("the "):
+                _exact_map[norm[4:]] = symbol
+
+            # Build token-set map (frozenset of tokens -> symbol)
+            tokens = frozenset(_tokenize(name))
+            if tokens:
+                _token_map[tokens] = symbol
+
+    except Exception:
+        # If NSE list fails, we still have fuzzy matching via yfinance search
+        _nse_companies = []
+        _exact_map = {}
+        _token_map = {}
+
+
+# ---------------------------------------------------------------------------
+# Ticker resolution
+# ---------------------------------------------------------------------------
 
 def resolve_ticker(company_name: str) -> Optional[str]:
     """
-    Resolve an Indian company name to a Yahoo Finance (.NS) ticker.
-    Uses NSE's complete company list (2,400+) with fuzzy matching.
-    Returns the ticker (e.g. 'TVSMOTOR.NS') or None if not found.
+    Resolve a company name to a yfinance-compatible ticker.
+
+    Pipeline:
+    1. Skip non-equity items (returns None)
+    2. Check foreign stock map
+    3. Check REIT map
+    4. Exact match on normalized name (NSE list)
+    5. Exact match on token set (NSE list)
+    6. Fuzzy match (SequenceMatcher + token Jaccard), threshold 0.60
+    7. yfinance search API fallback
+
+    Returns the ticker string (e.g. "HDFCBANK.NS", "GOOGL") or None.
     """
-    norm = _normalize(company_name)
+    if not company_name or not company_name.strip():
+        return None
 
-    # 1. Try alias map
-    if norm in _ALIAS_MAP:
-        return f"{_ALIAS_MAP[norm]}.NS"
+    name = company_name.strip()
+    nl = name.lower().strip()
 
-    lower = company_name.lower().strip()
-    if lower in _ALIAS_MAP:
-        return f"{_ALIAS_MAP[lower]}.NS"
+    # Step 1: Skip non-equity
+    if _should_skip(name):
+        return None
 
-    # 2. Load NSE companies (cached after first call)
+    # Step 2: Foreign stocks
+    if nl in FOREIGN_STOCKS:
+        return FOREIGN_STOCKS[nl]
+
+    # Also try normalized foreign stock lookup
+    norm = _normalize(name)
+    if norm in FOREIGN_STOCKS:
+        return FOREIGN_STOCKS[norm]
+
+    # Step 3: REITs
+    for reit_name, ticker in REIT_MAP.items():
+        if reit_name in nl:
+            return ticker
+
+    # Load NSE list if not loaded
     _load_nse_companies()
 
-    # 3. Try exact match against NSE company names
+    # Step 4: Exact normalized match
     if norm in _exact_map:
-        return f"{_exact_map[norm]}.NS"
+        return _exact_map[norm] + ".NS"
 
-    if norm.startswith("the "):
-        if norm[4:] in _exact_map:
-            return f"{_exact_map[norm[4:]]}.NS"
+    # Step 5: Token-set exact match
+    tokens = _tokenize(name)
+    token_set = frozenset(tokens)
+    if token_set and token_set in _token_map:
+        return _token_map[token_set] + ".NS"
 
-    # 4. Fuzzy match against all NSE company names
+    # Step 6: Fuzzy match
     if _nse_companies:
         best_score = 0.0
-        best_symbol = None
-
-        for c in _nse_companies:
-            score = SequenceMatcher(None, norm, c["norm_name"]).ratio()
+        best_sym = None
+        for nse_norm, sym in _exact_map.items():
+            s1 = SequenceMatcher(None, norm, nse_norm).ratio()
+            s2 = _token_set_ratio(tokens, sorted(nse_norm.split()))
+            score = max(s1, s2)
             if score > best_score:
                 best_score = score
-                best_symbol = c["symbol"]
+                best_sym = sym
 
-        if best_score >= 0.72:
-            return f"{best_symbol}.NS"
+        if best_score >= 0.60:
+            return best_sym + ".NS"
 
-    # 5. Yahoo Finance search API as last resort
-    ticker = _yahoo_search(company_name)
-    if ticker:
-        return ticker
-
-    return None
+    # Step 7: yfinance search fallback
+    return _yfinance_search(name)
 
 
-def _yahoo_search(company_name: str) -> Optional[str]:
-    """Use Yahoo Finance search API to resolve a ticker."""
+def _yfinance_search(name: str) -> Optional[str]:
+    """Use yfinance search API as last resort."""
     try:
-        resp = requests.get(
-            "https://query1.finance.yahoo.com/v1/finance/search",
-            params={"q": f"{company_name} NSE India", "quotesCount": 5, "newsCount": 0},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10,
-        )
-        data = resp.json()
-        quotes = data.get("quotes", [])
-        ns_quotes = [q for q in quotes if q.get("symbol", "").endswith(".NS")]
-        if ns_quotes:
-            return ns_quotes[0]["symbol"]
+        # yfinance doesn't have a public search API, but we can try
+        # common NSE suffix patterns
+        clean = re.sub(r'[^A-Za-z\s]', '', name).strip()
+        if not clean:
+            return None
+
+        # Try first word + NS
+        words = clean.split()
+        if words:
+            # Try the first significant word
+            guess = words[0].upper()
+            ticker = yf.Ticker(guess + ".NS")
+            info = ticker.history(period="2d")
+            if len(info) >= 1:
+                return guess + ".NS"
     except Exception:
         pass
     return None
 
 
 # ---------------------------------------------------------------------------
-# Price Change Fetcher
+# Price fetching
 # ---------------------------------------------------------------------------
 
-def fetch_price_changes(tickers: List[str]) -> Dict[str, Dict]:
+def fetch_price_changes(tickers: List[str], batch_size: int = 10) -> Dict[str, Dict]:
     """
-    Fetch current-day price change for a list of tickers using yfinance.
-    Returns dict: {ticker: {"prev_close": float, "curr_price": float, "change_pct": float}}
-    """
-    if not tickers:
-        return {}
+    Fetch current-day price changes for a list of tickers.
 
+    Returns dict: ticker -> {
+        "curr_price": float,
+        "prev_close": float,
+        "change_pct": float,
+    }
+    """
     results = {}
-    unique_tickers = list(set(tickers))
+    unique = list(set(tickers))
 
-    batch_size = 10
-    for i in range(0, len(unique_tickers), batch_size):
-        batch = unique_tickers[i:i + batch_size]
-        batch_results = _fetch_batch(batch)
-        results.update(batch_results)
-        if i + batch_size < len(unique_tickers):
-            time.sleep(0.5)
-
-    missing = [t for t in unique_tickers if t not in results]
-    for ticker in missing:
-        result = _fetch_single(ticker)
-        if result:
-            results[ticker] = result
-        time.sleep(0.2)
+    for i in range(0, len(unique), batch_size):
+        batch = unique[i:i + batch_size]
+        for ticker in batch:
+            try:
+                t = yf.Ticker(ticker)
+                hist = t.history(period="5d")
+                if len(hist) >= 2:
+                    curr_price = float(hist["Close"].iloc[-1])
+                    prev_close = float(hist["Close"].iloc[-2])
+                    if prev_close > 0:
+                        change_pct = ((curr_price - prev_close) / prev_close) * 100
+                    else:
+                        change_pct = 0.0
+                    results[ticker] = {
+                        "curr_price": curr_price,
+                        "prev_close": prev_close,
+                        "change_pct": change_pct,
+                    }
+                elif len(hist) == 1:
+                    curr_price = float(hist["Close"].iloc[-1])
+                    results[ticker] = {
+                        "curr_price": curr_price,
+                        "prev_close": curr_price,
+                        "change_pct": 0.0,
+                    }
+            except Exception:
+                pass
+        # Small delay between batches to avoid rate limiting
+        if i + batch_size < len(unique):
+            time.sleep(0.3)
 
     return results
 
 
-def _fetch_batch(tickers: List[str]) -> Dict[str, Dict]:
-    """Fetch price data for a batch of tickers via yf.download."""
-    results = {}
-    try:
-        data = yf.download(tickers, period="5d", progress=False, group_by="ticker")
-        if len(tickers) == 1:
-            ticker = tickers[0]
-            result = _extract_single(data, ticker)
-            if result:
-                results[ticker] = result
+# ---------------------------------------------------------------------------
+# Test / debug
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    test_names = [
+        "HDFC Bank Ltd", "Power Grid Corp Of India Ltd", "Coal India Ltd",
+        "Tata Consultancy Services Ltd", "Alphabet Inc Class A",
+        "Amazon.com Inc", "Microsoft Corp", "Meta Platforms Inc Class A",
+        "Bajaj Holdings and Investment Ltd", "Embassy Office Parks REIT",
+        "Brookfield India Real Estate Trust", "Eternal Ltd",
+        "Dr Reddy's Laboratories Ltd", "Zydus Lifesciences Ltd",
+        "Indian Energy Exchange Ltd", "E I D Parry India Ltd",
+        "Central Depository Services (India) Ltd", "Great Eastern Shipping Co Ltd",
+        "Canara Bank", "Bank Of Baroda", "Indian Bank",
+        "Narayana Hrudayalaya Ltd", "Mahanagar Gas Ltd", "REC Ltd.",
+        "Sun Pharmaceuticals Industries Ltd", "Cipla Ltd",
+        "HCL Technologies Ltd", "Infosys Ltd", "Bharti Airtel Ltd",
+        "Maruti Suzuki India Ltd", "Axis Bank Ltd", "Axis Bank Limited",
+        "Axis Bank Ltd.", "Kotak Mahindra Bank Ltd",
+        "Kotak Mahindra Bank Limited", "Kotak Mahindra Bank Ltd.",
+        "ICICI Bank Ltd", "ICICI Bank Limited", "HDFC Bank Limited",
+        "Reliance Industries Ltd", "Reliance Industries Limited",
+        "Bharat Petroleum Corp Ltd.", "Hindustan Petroleum Corp Ltd.",
+        "ITC Ltd", "Petronet LNG Ltd",
+        # Non-equity (should return None)
+        "Tbill", "Cash Offset For Derivatives", "Net Receivables / (Payables)",
+        "Bajaj Finance Limited August 2026 Future", "Future on BANK Index",
+        "National Bank For Agriculture And Rural Development",
+        "Export-Import Bank of India", "Parag Parikh Liquid Dir Gr",
+        "Small Industries Development Bank of India",
+        "Bank Of Baroda (16/10/2026)",
+        "Trp_030826",
+    ]
+
+    resolved = 0
+    skipped = 0
+    failed = 0
+    for name in test_names:
+        ticker = resolve_ticker(name)
+        if ticker:
+            resolved += 1
+            status = "OK"
+        elif _should_skip(name):
+            skipped += 1
+            status = "SKIP"
         else:
-            for ticker in tickers:
-                try:
-                    if ticker in data.columns.get_level_values(0):
-                        ticker_data = data[ticker].dropna(how="all")
-                        result = _extract_single(ticker_data, ticker)
-                        if result:
-                            results[ticker] = result
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    return results
+            failed += 1
+            status = "FAIL"
+        print(f"  [{status:4s}] {name:55s} -> {ticker}")
 
-
-def _extract_single(df, ticker: str) -> Optional[Dict]:
-    """Extract price change info from a DataFrame for a single ticker."""
-    try:
-        if df is None or df.empty:
-            return None
-        close = df["Close"].dropna()
-        if len(close) < 2:
-            return None
-        prev_close = float(close.iloc[-2])
-        curr_price = float(close.iloc[-1])
-        if prev_close == 0:
-            return None
-        change_pct = ((curr_price - prev_close) / prev_close) * 100
-        return {"prev_close": prev_close, "curr_price": curr_price, "change_pct": change_pct}
-    except Exception:
-        return None
-
-
-def _fetch_single(ticker: str) -> Optional[Dict]:
-    """Fetch price data for a single ticker (fallback)."""
-    try:
-        t = yf.Ticker(ticker)
-        hist = t.history(period="5d")
-        return _extract_single(hist, ticker)
-    except Exception:
-        return None
+    print(f"\nResolved: {resolved}, Skipped: {skipped}, Failed: {failed}")
+    print(f"Total: {len(test_names)}")
