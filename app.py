@@ -26,219 +26,41 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# --- Theme: read from URL query param so it survives refresh ---
-_qp = st.query_params
-_url_theme = _qp.get("theme", "").lower()
-if _url_theme in ("dark", "light"):
-    st.session_state.theme_mode = _url_theme.capitalize()
-elif "theme_mode" not in st.session_state:
-    st.session_state.theme_mode = "Light"
+# --- Theme detection: use Streamlit's built-in Light/Dark switcher ---
+# (the three-dot menu top right). This JS snippet detects the active theme
+# and writes it to the URL query param so Plotly charts can adapt.
+import streamlit.components.v1 as components
 
-_current_theme = st.session_state.theme_mode
+components.html("""
+<script>
+    function detectTheme() {
+        try {
+            var el = window.parent.document.querySelector('[data-testid="stAppViewContainer"]')
+                  || window.parent.document.querySelector('.stApp');
+            if (!el) return 'light';
+            var bg = window.getComputedStyle(el).backgroundColor;
+            var m = bg.match(/\d+/g);
+            if (m && parseInt(m[0]) < 50) return 'dark';
+            return 'light';
+        } catch(e) { return 'light'; }
+    }
+    var theme = detectTheme();
+    try {
+        var url = new URL(window.parent.location.href);
+        if (url.searchParams.get('st_theme') !== theme) {
+            url.searchParams.set('st_theme', theme);
+            window.parent.history.replaceState({}, '', url);
+        }
+    } catch(e) {}
+</script>
+""", height=0, width=0)
 
-# Title + theme toggle (top right)
-col_title, col_theme = st.columns([8, 1])
-with col_title:
-    st.title("MF Return Estimator")
-    st.caption("Estimate today's mutual fund return from underlying stock holdings")
-with col_theme:
-    st.markdown("&nbsp;")
-    _new_theme = st.radio(
-        "Mode", ["Light", "Dark"], horizontal=True,
-        index=0 if _current_theme == "Light" else 1,
-        key="theme_radio", label_visibility="collapsed",
-    )
-    if _new_theme != _current_theme:
-        st.session_state.theme_mode = _new_theme
-        st.query_params["theme"] = _new_theme.lower()
-        st.rerun()
+# Read detected theme for Plotly chart templates
+_detected_theme = st.query_params.get("st_theme", "light")
+st.session_state["theme_mode"] = "Dark" if _detected_theme == "dark" else "Light"
 
-# Inject CSS using chr() to build style tags (avoids HTML stripping in commit)
-_s = chr(60) + "style" + chr(62)
-_se = chr(60) + "/style" + chr(62)
-
-if st.session_state.theme_mode == "Dark":
-    st.markdown(_s + """
-    /* ===== MAIN APP BACKGROUND + HEADER BAR ===== */
-    .stApp { background-color: #0e1117 !important; color: #e6edf3 !important; }
-
-    /* Kill ALL white backgrounds in the top header bar */
-    header, [data-testid="stHeader"], [data-testid="stToolbar"],
-    [data-testid="stMainMenu"], [data-testid="stHeader"] > div,
-    [data-testid="stToolbar"] > div, [data-testid="stHeader"] div,
-    [data-testid="stToolbar"] div, [data-testid="stMainMenu"] div {
-        background-color: #0e1117 !important;
-        color: #e6edf3 !important;
-    }
-    header *, [data-testid="stHeader"] *,
-    [data-testid="stToolbar"] *, [data-testid="stMainMenu"] * {
-        background-color: #0e1117 !important;
-        color: #e6edf3 !important;
-    }
-    header svg, [data-testid="stHeader"] svg,
-    [data-testid="stToolbar"] svg, [data-testid="stMainMenu"] svg {
-        fill: #e6edf3 !important;
-        color: #e6edf3 !important;
-    }
-
-    /* ===== ALL TEXT ELEMENTS ===== */
-    .stApp, .stApp p, .stApp span, .stApp li, .stApp strong,
-    .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6 {
-        color: #e6edf3 !important;
-    }
-    .stApp .stMarkdown, .stApp .stMarkdown p, .stApp .stMarkdown span {
-        color: #e6edf3 !important;
-    }
-
-    /* ===== METRICS ===== */
-    .stApp [data-testid="stMetric"] label {
-        color: #8b949e !important;
-    }
-    .stApp [data-testid="stMetric"] [data-testid="stMetricValue"] {
-        color: #e6edf3 !important;
-    }
-    .stApp [data-testid="stMetric"] [data-testid="stMetricDelta"] {
-        color: #e6edf3 !important;
-    }
-
-    /* ===== BUTTONS (fix: white box issue) ===== */
-    .stApp .stButton button {
-        background-color: #21262d !important;
-        color: #e6edf3 !important;
-        border: 1px solid #30363d !important;
-    }
-    .stApp .stButton button:hover {
-        background-color: #30363d !important;
-        color: #ffffff !important;
-        border-color: #8b949e !important;
-    }
-    .stApp .stButton button[kind="primary"] {
-        background-color: #1f6feb !important;
-        color: #ffffff !important;
-        border: none !important;
-    }
-    .stApp .stButton button[kind="primary"]:hover {
-        background-color: #388bfd !important;
-        color: #ffffff !important;
-    }
-
-    /* ===== INPUT FIELDS ===== */
-    .stApp input, .stApp textarea,
-    .stApp [data-baseweb="input"] input,
-    .stApp [data-baseweb="textarea"] textarea {
-        background-color: #0d1117 !important;
-        color: #e6edf3 !important;
-        border-color: #30363d !important;
-    }
-    .stApp input::placeholder, .stApp textarea::placeholder {
-        color: #6e7681 !important;
-        opacity: 1 !important;
-    }
-    .stApp [data-baseweb="base-input"] {
-        background-color: #0d1117 !important;
-    }
-
-    /* ===== SELECT BOXES ===== */
-    .stApp [data-baseweb="select"] > div {
-        background-color: #0d1117 !important;
-        color: #e6edf3 !important;
-        border-color: #30363d !important;
-    }
-    .stApp [data-baseweb="select"] span {
-        color: #e6edf3 !important;
-    }
-
-    /* ===== TABS ===== */
-    .stApp .stTabs [data-baseweb="tab"] {
-        color: #8b949e !important;
-        background-color: transparent !important;
-    }
-    .stApp .stTabs [data-baseweb="tab"]:hover {
-        color: #e6edf3 !important;
-    }
-    .stApp .stTabs [aria-selected="true"] {
-        color: #ffffff !important;
-    }
-    .stApp .stTabs [data-baseweb="tab-highlight"] {
-        background-color: #1f6feb !important;
-    }
-    .stApp .stTabs [data-baseweb="tab-border"] {
-        border-bottom-color: #1f6feb !important;
-    }
-
-    /* ===== SIDEBAR ===== */
-    .stApp [data-testid="stSidebar"] {
-        background-color: #161b22 !important;
-    }
-    .stApp [data-testid="stSidebar"] * {
-        color: #c9d1d9 !important;
-    }
-
-    /* EXPANDERS */
-    .stApp [data-testid="stExpander"] {
-        background-color: #161b22 !important;
-        border-color: #30363d !important;
-    }
-    .stApp [data-testid="stExpander"] * {
-        color: #e6edf3 !important;
-    }
-
-    /* ===== ALERTS / INFO BOXES ===== */
-    .stApp [data-testid="stAlert"] {
-        background-color: #161b22 !important;
-        color: #e6edf3 !important;
-        border: 1px solid #30363d !important;
-    }
-    .stApp [data-testid="stAlert"] * {
-        color: #e6edf3 !important;
-    }
-
-    /* ===== DATAFRAMES ===== */
-    .stApp [data-testid="stDataFrame"] {
-        background-color: #161b22 !important;
-        color: #e6edf3 !important;
-    }
-    .stApp [data-testid="stDataFrame"] * {
-        color: #e6edf3 !important;
-    }
-    .stApp .stDataFrame table, .stApp .stDataFrame th, .stApp .stDataFrame td {
-        background-color: #0d1117 !important;
-        color: #e6edf3 !important;
-        border-color: #30363d !important;
-    }
-
-    /* ===== PROGRESS BAR ===== */
-    .stApp [data-testid="stProgress"] > div > div {
-        background-color: #1f6feb !important;
-    }
-
-    /* ===== HORIZONTAL RULES ===== */
-    .stApp hr { border-color: #30363d !important; }
-
-    /* ===== CONTAINERS / COLUMNS ===== */
-    .stApp [data-testid="stVerticalBlock"] > div {
-        color: #e6edf3 !important;
-    }
-    .stApp [data-testid="column"] {
-        color: #e6edf3 !important;
-    }
-
-    /* ===== CODE BLOCKS ===== */
-    .stApp code, .stApp pre {
-        background-color: #161b22 !important;
-        color: #e6edf3 !important;
-    }
-
-    /* ===== DATA TABLE HEADER ===== */
-    .stApp [data-testid="stDataFrame"] [data-testid="stTableHeader"] {
-        background-color: #21262d !important;
-    }
-    """ + _se, unsafe_allow_html=True)
-else:
-    st.markdown(_s + """
-    .stApp { background-color: #ffffff; color: #262730; }
-    """ + _se, unsafe_allow_html=True)
-
+st.title("MF Return Estimator")
+st.caption("Estimate today's mutual fund return from underlying stock holdings")
 
 tab_search, tab_sheet = st.tabs(["Search MF", "Load from Sheet"])
 

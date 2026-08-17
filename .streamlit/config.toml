@@ -1,5 +1,16 @@
-[server]
-headless = true
-
 [theme]
-base = "light"
+defaultTheme = "light"
+
+[theme.light]
+primaryColor = "#1f6feb"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f0f2f6"
+textColor = "#262730"
+font = "sans serif"
+
+[theme.dark]
+primaryColor = "#1f6feb"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#161b22"
+textColor = "#e6edf3"
+font = "sans serif"
