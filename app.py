@@ -56,23 +56,19 @@ components.html("""
 """, height=0, width=0)
 
 # --- Google Analytics 4 Integration (Measurement ID: G-WGVCPVK4H6) ---
-# Injects gtag.js into the parent page to track page views and user interactions
-components.html("""
-<script>
-    var d = window.parent.document;
-    var s = d.createElement('script');
-    s.async = true;
-    s.src = 'https://www.googletagmanager.com/gtag/js?id=G-WGVCPVK4H6';
-    d.head.appendChild(s);
-    window.parent.dataLayer = window.parent.dataLayer || [];
-    window.parent.gtag = function(){ window.parent.dataLayer.push(arguments); };
-    window.parent.gtag('js', new Date());
-    window.parent.gtag('config', 'G-WGVCPVK4H6', {
-        page_title: 'MF Return Estimator',
-        page_location: window.parent.location.href
-    });
-</script>
-""", height=0, width=0)
+# Loads gtag.js directly inside this iframe - no window.parent access needed
+# Uses components.html (not st.markdown) because st.markdown strips script tags
+_lt = chr(60)
+ga_script = (
+    _lt + "script async src='https://www.googletagmanager.com/gtag/js?id=G-WGVCPVK4H6'" + _lt + "/script" + chr(62)
+    + _lt + "script" + chr(62)
+    + "window.dataLayer=window.dataLayer||[];"
+    + "function gtag(){dataLayer.push(arguments);}"
+    + "gtag('js',new Date());"
+    + "gtag('config','G-WGVCPVK4H6',{page_title:'MF Return Estimator',page_location:window.location.href});"
+    + _lt + "/script" + chr(62)
+)
+components.html(ga_script, height=0, width=0)
 
 # Read detected theme for Plotly chart templates
 _detected_theme = st.query_params.get("st_theme", "light")
