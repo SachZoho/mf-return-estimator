@@ -2,13 +2,26 @@
 Mutual Fund data module — handles fund search and holdings retrieval.
 
 Data sources (in priority order):
-1. AMFI Portal (portal.amfiindia.com) — SEBI-mandated monthly portfolio
-   disclosures with a known "as of" date. Complete holdings (not just top 10).
-2. FinAPI (finapi.upvaly.com) — free JSON API for portfolio holdings (no date)
-3. mfdata.in — free JSON API for holdings (alternative, no date)
-4. Groww — fallback holdings scraping (JS-rendered, may not work)
+1. FinAPI (finapi.upvaly.com) — free JSON API. The scheme-code endpoint returns
+   the full portfolio holdings (name, sector, marketValue, weightage) plus a
+   latestNavDate that doubles as a holdings "as of" date. Zero auth.
+   Docs: https://www.finapi.upvaly.com/
+2. FinAPI name search — same API, looked up by scheme name when no scheme code
+   is available. Uses the `schemeName` query param (NOT `q`).
+3. mfdata.in — free JSON API for holdings via family-id lookup (no date).
+4. AMFI NAV flat-file — used only to resolve/validate scheme codes; the AMFI
+   portal does NOT expose per-scheme holdings JSON, so it is no longer used as a
+   holdings source.
+5. Groww — fallback HTML scraping (JS-rendered page; best-effort, no date).
 
 All sources are free and require no API key.
+
+NOTE (2026-08): The previous version called AMFI's DownloadSchemeData_Po.aspx
+with invented params (mession/mession_code/mf/yr/myession) expecting a per-scheme
+holdings table. That endpoint actually returns the full scheme master list (a
+semicolon-delimited text dump), so it never contained holdings — which is why
+"AMFI: no holdings found in last 3 months" fired for every fund. FinAPI's
+scheme-code endpoint is the reliable holdings source and is now primary.
 """
 
 import re
@@ -25,7 +38,7 @@ from typing import List, Dict, Optional, Tuple
 MFAPI_BASE = "https://api.mfapi.in/mf"
 FINAPI_BASE = "https://finapi.upvaly.com/api/mf"
 MFDATA_BASE = "https://mfdata.in/api/v1"
-AMFI_PORTFOLIO_URL = "https://portal.amfiindia.com/DownloadSchemeData_Po.aspx"
+AMFI_SCHEME_MASTER_URL = "https://portal.amfiindia.com/DownloadSchemeData_Po.aspx?mf=0"
 
 HEADERS = {
     "User-Agent": (
@@ -48,7 +61,7 @@ def _get_all_schemes() -> List[Dict]:
     if _scheme_cache is not None:
         return _scheme_cache
     try:
-        resp = requests.get(f"{MFAPI_BASE}", timeout=20)
+        resp = requests.get(f"{MFAPI_BASE}", timeout=30)
         resp.raise_for_status()
         _scheme_cache = resp.json()
         return _scheme_cache
@@ -111,136 +124,21 @@ def get_fund_meta(scheme_code: str) -> Dict:
 
 
 # ---------------------------------------------------------------------------
-# Holdings via AMFI Portal — SEBI monthly portfolio disclosures (WITH DATE)
+# Holdings via FinAPI (finapi.upvaly.com) — primary source
+# Docs: https://www.finapi.upvaly.com/
+#   GET /api/mf/scheme-code/{schemeCode}          (use fields=holdings)
+#   GET /api/mf/search?schemeName=<keyword>        (NOTE: schemeName, not q)
+# Returns clean JSON with holdings [{name, sector, marketValue, weightage, ...}]
+# and a latestNavDate usable as the holdings "as of" date.
 # ---------------------------------------------------------------------------
 
-def fetch_holdings_amfi(scheme_code: str, month: int, year: int) -> Tuple[Optional[List[Dict]], str, Optional[str]]:
+def fetch_holdings_finapi(scheme_code: str) -> Tuple[Optional[List[Dict]], str, Optional[str]]:
     """
-    Fetch holdings from AMFI's SEBI-mandated monthly portfolio disclosure.
+    Fetch holdings from FinAPI by scheme code.
 
     Returns (holdings_list, error_msg, holdings_date).
-    holdings_date is a string like "July 2025" or None on failure.
+    holdings_date is taken from the fund's latestNavDate when present.
     """
-    try:
-        resp = requests.get(
-            AMFI_PORTFOLIO_URL,
-            params={
-                "mession": "24",
-                "mession_code": scheme_code,
-                "mf": month,
-                "yr": year,
-                "myession": "S",
-            },
-            headers=HEADERS,
-            timeout=30,
-        )
-        if resp.status_code != 200:
-            return None, f"AMFI HTTP {resp.status_code}", None
-
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        # Try to extract the "as on" date from the page
-        holdings_date = _extract_amfi_date(soup, month, year)
-
-        table = soup.find("table")
-        if not table:
-            return None, "AMFI: no holdings table found", None
-
-        rows = []
-        for tr in table.find_all("tr"):
-            cells = [td.get_text(strip=True) for td in tr.find_all("td")]
-            if len(cells) >= 5:
-                rows.append(cells)
-
-        if not rows:
-            return None, "AMFI: table has no data rows", None
-
-        # AMFI table format: Company, Sector, Quantity, Market Value (Rs lakh), % to NAV
-        # Skip header rows (first row(s) with non-numeric quantity)
-        holdings = []
-        for cells in rows:
-            company = cells[0].strip()
-            sector = cells[1].strip() if len(cells) > 1 else "N/A"
-            qty_str = cells[2].strip().replace(",", "") if len(cells) > 2 else ""
-            mv_str = cells[3].strip().replace(",", "") if len(cells) > 3 else ""
-            pct_str = cells[4].strip().replace("%", "").replace(",", "") if len(cells) > 4 else ""
-
-            # Skip rows where quantity is not a number (header rows)
-            try:
-                float(qty_str)
-            except (ValueError, TypeError):
-                continue
-
-            try:
-                weight = float(pct_str)
-            except (ValueError, TypeError):
-                continue
-
-            if not company or weight <= 0:
-                continue
-
-            instrument = _classify_instrument(company, sector)
-            holdings.append({
-                "name": company,
-                "sector": sector,
-                "instrument": instrument,
-                "weight": weight,
-            })
-
-        if not holdings:
-            return None, "AMFI: no valid holdings parsed", None
-
-        return holdings, "", holdings_date
-
-    except Exception as e:
-        return None, f"AMFI error: {str(e)[:100]}", None
-
-
-def _extract_amfi_date(soup, month: int, year: int) -> Optional[str]:
-    """Try to extract the 'As on' date from the AMFI disclosure page."""
-    try:
-        text = soup.get_text()
-        # Look for "As on" pattern
-        match = re.search(r"As on[:\s]+([\w\s,]+?)(?:\n|$)", text)
-        if match:
-            date_str = match.group(1).strip()
-            if len(date_str) < 60:
-                return date_str
-    except Exception:
-        pass
-    # Fallback: construct from month/year params
-    month_names = ["", "January", "February", "March", "April", "May", "June",
-                   "July", "August", "September", "October", "November", "December"]
-    if 1 <= month <= 12:
-        return f"{month_names[month]} {year}"
-    return None
-
-
-def fetch_latest_holdings_amfi(scheme_code: str, months_back: int = 3) -> Tuple[Optional[List[Dict]], str, Optional[str]]:
-    """
-    Try to fetch the latest available holdings from AMFI portal.
-    Starts from the current month and goes back up to months_back months.
-    Returns (holdings, error_msg, holdings_date).
-    """
-    now = datetime.now()
-    for i in range(months_back):
-        m = now.month - i
-        y = now.year
-        while m <= 0:
-            m += 12
-            y -= 1
-        holdings, err, date_str = fetch_holdings_amfi(scheme_code, m, y)
-        if holdings:
-            return holdings, "", date_str
-    return None, f"AMFI: no holdings found in last {months_back} months", None
-
-
-# ---------------------------------------------------------------------------
-# Holdings via FinAPI (finapi.upvaly.com) — clean JSON, no date
-# ---------------------------------------------------------------------------
-
-def fetch_holdings_finapi(scheme_code: str) -> Tuple[Optional[List[Dict]], str]:
-    """Fetch holdings from FinAPI. Returns (holdings_list, error_msg)."""
     try:
         resp = requests.get(
             f"{FINAPI_BASE}/scheme-code/{scheme_code}",
@@ -248,55 +146,84 @@ def fetch_holdings_finapi(scheme_code: str) -> Tuple[Optional[List[Dict]], str]:
             headers={**HEADERS, "Accept": "application/json"},
             timeout=20,
         )
+        if resp.status_code == 404:
+            return None, f"FinAPI HTTP 404 (scheme code {scheme_code} not found)", None
+        if resp.status_code == 429:
+            return None, "FinAPI HTTP 429 (rate limited — retry shortly)", None
         if resp.status_code != 200:
-            return None, f"FinAPI returned HTTP {resp.status_code}"
+            return None, f"FinAPI returned HTTP {resp.status_code}", None
 
         data = resp.json()
         if data.get("status") != "success":
-            return None, f"FinAPI status: {data.get('status', 'unknown')}"
+            return None, f"FinAPI status: {data.get('status', 'unknown')}", None
 
         fund_data = data.get("data", {})
+        if isinstance(fund_data, list):
+            fund_data = fund_data[0] if fund_data else {}
+
+        # holdings "as of" date — FinAPI exposes latestNavDate (yyyy-mm-dd)
+        holdings_date = _format_finapi_date(fund_data.get("latestNavDate"))
+
         raw_holdings = fund_data.get("holdings", [])
         if not raw_holdings:
-            return None, "FinAPI returned 0 holdings"
+            return None, "FinAPI returned 0 holdings", holdings_date
 
         holdings = _parse_finapi_holdings(raw_holdings)
         if not holdings:
-            return None, "FinAPI holdings parsed to empty list"
+            return None, "FinAPI holdings parsed to empty list", holdings_date
 
-        return holdings, ""
+        return holdings, "", holdings_date
 
+    except requests.Timeout:
+        return None, "FinAPI error: request timed out", None
     except Exception as e:
-        return None, f"FinAPI error: {str(e)[:100]}"
+        return None, f"FinAPI error: {str(e)[:100]}", None
+
+
+def _format_finapi_date(date_str: Optional[str]) -> Optional[str]:
+    """Convert FinAPI's yyyy-mm-dd latestNavDate into 'Month YYYY' for display."""
+    if not date_str:
+        return None
+    try:
+        dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
+        return dt.strftime("%B %Y")
+    except (ValueError, TypeError):
+        return None
 
 
 def _parse_finapi_holdings(raw_holdings: list) -> List[Dict]:
     """Parse FinAPI holdings into standard format."""
     holdings = []
     for h in raw_holdings:
+        if not isinstance(h, dict):
+            continue
         name = h.get("name", "")
-        sector = h.get("sector", "N/A")
+        sector = h.get("sector")
+        if not sector or not isinstance(sector, str) or not sector.strip():
+            sector = "N/A"
         weight = h.get("weightage") or h.get("weight") or h.get("percentage")
         instrument = _classify_instrument(name, sector)
 
         if name and weight is not None:
             try:
                 weight_float = float(weight)
-                holdings.append({
-                    "name": name,
-                    "sector": sector,
-                    "instrument": instrument,
-                    "weight": weight_float,
-                })
             except (ValueError, TypeError):
                 continue
+            if weight_float <= 0:
+                continue
+            holdings.append({
+                "name": name,
+                "sector": sector,
+                "instrument": instrument,
+                "weight": weight_float,
+            })
     return holdings
 
 
 def _classify_instrument(name: str, sector: str) -> str:
     """Classify a holding as Equity, Debt, Cash, etc. based on name/sector."""
     name_lower = name.lower()
-    if any(w in name_lower for w in ["tbill", "treasury", "cblo", "repo", "reverse repo"]):
+    if any(w in name_lower for w in ["tbill", "treasury", "treps", "cblo", "repo", "reverse repo"]):
         return "Treasury/Repo"
     if any(w in name_lower for w in ["future", "option", "derivative"]):
         return "Derivative"
@@ -315,45 +242,108 @@ def _classify_instrument(name: str, sector: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Holdings via mfdata.in (alternative free JSON API, no date)
+# FinAPI search by name (fallback when scheme code lookup is unavailable/fails)
+# IMPORTANT: the query param is `schemeName`, NOT `q`. Using `q` returns HTTP 500.
 # ---------------------------------------------------------------------------
 
-def fetch_holdings_mfdata(scheme_code: str) -> Tuple[Optional[List[Dict]], str]:
+def _fetch_holdings_finapi_by_name(scheme_name: str) -> Tuple[Optional[List[Dict]], str, Optional[str]]:
+    """Search FinAPI by name, then fetch holdings for best match."""
+    search_query = scheme_name.replace(" - ", " ").strip()
+    try:
+        resp = requests.get(
+            f"{FINAPI_BASE}/search",
+            params={"schemeName": search_query},
+            headers={**HEADERS, "Accept": "application/json"},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            return None, f"FinAPI search HTTP {resp.status_code}", None
+
+        data = resp.json()
+        if data.get("status") != "success":
+            return None, "FinAPI search failed", None
+
+        results = data.get("data", [])
+        if not results:
+            return None, "FinAPI search: 0 results", None
+
+        best_match = None
+        best_score = -1
+        for r in results:
+            r_name = r.get("schemeName", "").lower()
+            score = 0
+            if "direct" in r_name:
+                score += 10
+            if "growth" in r_name:
+                score += 10
+            if "regular" in r_name:
+                score -= 5
+            if "idcw" in r_name or "dividend" in r_name:
+                score -= 5
+            from difflib import SequenceMatcher
+            score += SequenceMatcher(None, scheme_name.lower(), r_name).ratio() * 5
+            if score > best_score:
+                best_score = score
+                best_match = r
+
+        if best_match:
+            code = best_match.get("schemeCode")
+            if code:
+                return fetch_holdings_finapi(code)
+
+        return None, "FinAPI search: no suitable match", None
+
+    except Exception as e:
+        return None, f"FinAPI search error: {str(e)[:100]}", None
+
+
+# ---------------------------------------------------------------------------
+# Holdings via mfdata.in (alternative free JSON API, no date)
+# Flow: /schemes/{amfi_code} -> family_id -> /families/{family_id}/holdings
+# ---------------------------------------------------------------------------
+
+def fetch_holdings_mfdata(scheme_code: str) -> Tuple[Optional[List[Dict]], str, Optional[str]]:
     """Fetch holdings from mfdata.in."""
     try:
         resp = requests.get(
             f"{MFDATA_BASE}/schemes/{scheme_code}",
             headers={**HEADERS, "Accept": "application/json"},
-            timeout=15,
+            timeout=20,
         )
         if resp.status_code != 200:
-            return None, f"mfdata.in scheme lookup HTTP {resp.status_code}"
+            return None, f"mfdata.in scheme lookup HTTP {resp.status_code}", None
 
         data = resp.json()
         if data.get("status") != "success":
-            return None, "mfdata.in scheme lookup failed"
+            return None, "mfdata.in scheme lookup failed", None
 
         scheme_data = data.get("data", {})
-        family_id = scheme_data.get("family_id") or scheme_data.get("familyId")
+        if isinstance(scheme_data, list):
+            scheme_data = scheme_data[0] if scheme_data else {}
+        family_id = scheme_data.get("family_id") or scheme_data.get("familyId") or scheme_data.get("family")
         if not family_id:
-            return None, "mfdata.in: no family_id found"
+            return None, "mfdata.in: no family_id found", None
 
         resp2 = requests.get(
             f"{MFDATA_BASE}/families/{family_id}/holdings",
             headers={**HEADERS, "Accept": "application/json"},
-            timeout=15,
+            timeout=20,
         )
         if resp2.status_code != 200:
-            return None, f"mfdata.in holdings HTTP {resp2.status_code}"
+            return None, f"mfdata.in holdings HTTP {resp2.status_code}", None
 
         data2 = resp2.json()
         if data2.get("status") != "success":
-            return None, "mfdata.in holdings failed"
+            return None, "mfdata.in holdings failed", None
 
         holdings_data = data2.get("data", {})
-        raw_holdings = holdings_data.get("equity_holdings", []) or holdings_data.get("stocks", [])
+        if isinstance(holdings_data, list):
+            holdings_data = holdings_data[0] if holdings_data else {}
+        raw_holdings = (holdings_data.get("equity_holdings", [])
+                        or holdings_data.get("stocks", [])
+                        or holdings_data.get("holdings", []))
         if not raw_holdings:
-            return None, "mfdata.in returned 0 equity holdings"
+            return None, "mfdata.in returned 0 equity holdings", None
 
         holdings = []
         for h in raw_holdings:
@@ -372,67 +362,14 @@ def fetch_holdings_mfdata(scheme_code: str) -> Tuple[Optional[List[Dict]], str]:
                     continue
 
         if not holdings:
-            return None, "mfdata.in holdings parsed to empty"
+            return None, "mfdata.in holdings parsed to empty", None
 
-        return holdings, ""
+        return holdings, "", None
 
+    except requests.Timeout:
+        return None, "mfdata.in error: connection timed out", None
     except Exception as e:
-        return None, f"mfdata.in error: {str(e)[:100]}"
-
-
-# ---------------------------------------------------------------------------
-# Holdings via FinAPI search by name (fallback when scheme code lookup fails)
-# ---------------------------------------------------------------------------
-
-def _fetch_holdings_finapi_by_name(scheme_name: str) -> Tuple[Optional[List[Dict]], str]:
-    """Search FinAPI by name, then fetch holdings for best match."""
-    search_query = scheme_name.replace(" - ", " ").strip()
-    try:
-        resp = requests.get(
-            f"{FINAPI_BASE}/search",
-            params={"q": search_query},
-            headers={**HEADERS, "Accept": "application/json"},
-            timeout=15,
-        )
-        if resp.status_code != 200:
-            return None, f"FinAPI search HTTP {resp.status_code}"
-
-        data = resp.json()
-        if data.get("status") != "success":
-            return None, "FinAPI search failed"
-
-        results = data.get("data", [])
-        if not results:
-            return None, "FinAPI search: 0 results"
-
-        best_match = None
-        best_score = -1
-        for r in results:
-            r_name = r.get("schemeName", "").lower()
-            r_plan = r.get("planName", "").lower()
-            r_option = r.get("optionName", "").lower()
-            score = 0
-            if "direct" in r_plan:
-                score += 10
-            if "growth" in r_option:
-                score += 10
-            if "regular" in r_plan:
-                score -= 5
-            from difflib import SequenceMatcher
-            score += SequenceMatcher(None, scheme_name.lower(), r_name).ratio() * 5
-            if score > best_score:
-                best_score = score
-                best_match = r
-
-        if best_match:
-            code = best_match.get("schemeCode")
-            if code:
-                return fetch_holdings_finapi(code)
-
-        return None, "FinAPI search: no suitable match"
-
-    except Exception as e:
-        return None, f"FinAPI search error: {str(e)[:100]}"
+        return None, f"mfdata.in error: {str(e)[:100]}", None
 
 
 # ---------------------------------------------------------------------------
@@ -589,44 +526,32 @@ def fetch_holdings(scheme_name: str, scheme_code: str = None) -> Tuple[Optional[
 
     Returns (holdings_list, source_or_error, holdings_date).
 
-    On success: (holdings, "AMFI Portal", "July 2025") or
-                (holdings, "FinAPI", None) etc.
+    On success: (holdings, "FinAPI", "August 2026") etc.
     On failure: (None, "Detailed error from all sources", None).
-
-    The AMFI Portal is tried first because it provides dated, SEBI-mandated
-    monthly disclosures. FinAPI and other sources are used as fallbacks
-    (they don't expose a holdings date).
     """
     errors = []
 
-    # 1. Try AMFI Portal (dated holdings — SEBI monthly disclosure)
+    # 1. Try FinAPI by scheme code (primary — returns holdings + dated NAV)
     if scheme_code:
-        holdings, err, date_str = fetch_latest_holdings_amfi(scheme_code)
+        holdings, err, date_str = fetch_holdings_finapi(scheme_code)
         if holdings:
-            return holdings, "AMFI Portal", date_str
-        errors.append(f"AMFI(scheme {scheme_code}): {err}")
-
-    # 2. Try FinAPI by scheme code (no date)
-    if scheme_code:
-        holdings, err = fetch_holdings_finapi(scheme_code)
-        if holdings:
-            return holdings, "FinAPI", None
+            return holdings, "FinAPI", date_str
         errors.append(f"FinAPI(scheme {scheme_code}): {err}")
 
-    # 3. Try FinAPI by name search (no date)
-    holdings, err = _fetch_holdings_finapi_by_name(scheme_name)
+    # 2. Try FinAPI by name search (no scheme code, or scheme-code lookup failed)
+    holdings, err, date_str = _fetch_holdings_finapi_by_name(scheme_name)
     if holdings:
-        return holdings, "FinAPI (name search)", None
+        return holdings, "FinAPI (name search)", date_str
     errors.append(f"FinAPI(name): {err}")
 
-    # 4. Try mfdata.in (no date)
+    # 3. Try mfdata.in (no date)
     if scheme_code:
-        holdings, err = fetch_holdings_mfdata(scheme_code)
+        holdings, err, _ = fetch_holdings_mfdata(scheme_code)
         if holdings:
             return holdings, "mfdata.in", None
         errors.append(f"mfdata.in: {err}")
 
-    # 5. Try Groww scraping (last resort, no date)
+    # 4. Try Groww scraping (last resort, no date)
     holdings, err = fetch_holdings_groww(scheme_name)
     if holdings:
         return holdings, "Groww", None
