@@ -128,54 +128,75 @@ def get_fund_meta(scheme_code: str) -> Dict:
 # and a latestNavDate usable as the holdings "as of" date.
 # ---------------------------------------------------------------------------
 
+def _finapi_get(url: str, params: Optional[dict] = None) -> Tuple[Optional[requests.Response], str]:
+    """GET a FinAPI URL with CORS-proxy fallback.
+
+    FinAPI returns 404 from Streamlit Cloud's IP, so a direct request alone is
+    not enough. This tries the direct request first, then falls back to public
+    CORS proxies (allorigins.win, then corsproxy.io).
+
+    Returns (resp, error_string). On success resp is a requests.Response with
+    status_code 200 and error_string is "". On failure resp is None.
+    """
+    from urllib.parse import quote
+
+    headers = {**HEADERS, "Accept": "application/json"}
+
+    # a) Direct request to FinAPI
+    direct_err = ""
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=20)
+        if resp.status_code == 200:
+            return resp, ""
+        direct_err = f"FinAPI direct HTTP {resp.status_code}"
+    except Exception as e:
+        direct_err = f"FinAPI direct error: {str(e)[:100]}"
+
+    # Build the full URL (with query string already applied) for proxy fallback
+    full_url = url
+    if params:
+        full_url = requests.Request("GET", url, params=params).prepare().url
+    encoded_url = quote(full_url, safe="")
+
+    # b) allorigins.win proxy
+    allorigins_err = ""
+    try:
+        proxy_url = f"https://api.allorigins.win/raw?url={encoded_url}"
+        resp = requests.get(proxy_url, headers=headers, timeout=25)
+        if resp.status_code == 200:
+            return resp, ""
+        allorigins_err = f"allorigins HTTP {resp.status_code}"
+    except Exception as e:
+        allorigins_err = f"allorigins error: {str(e)[:100]}"
+
+    # c) corsproxy.io
+    corsproxy_err = ""
+    try:
+        proxy_url = f"https://corsproxy.io/?url={encoded_url}"
+        resp = requests.get(proxy_url, headers=headers, timeout=25)
+        if resp.status_code == 200:
+            return resp, ""
+        corsproxy_err = f"corsproxy HTTP {resp.status_code}"
+    except Exception as e:
+        corsproxy_err = f"corsproxy error: {str(e)[:100]}"
+
+    return None, f"{direct_err}; {allorigins_err}; {corsproxy_err}"
+
+
 def fetch_holdings_finapi(scheme_code: str) -> Tuple[Optional[List[Dict]], str, Optional[str]]:
     """
     Fetch holdings from FinAPI by scheme code.
-    Retries up to 3 times on 404/429/timeout (intermittent failures on Streamlit Cloud).
+
+    Uses _finapi_get with CORS-proxy fallback because FinAPI returns 404
+    from Streamlit Cloud's IP (retrying the same direct request won't help).
 
     Returns (holdings_list, error_msg, holdings_date).
     holdings_date is taken from the fund's latestNavDate when present.
     """
-    import time
-    last_error = ""
-    resp = None
-    for attempt in range(3):
-        try:
-            resp = requests.get(
-                f"{FINAPI_BASE}/scheme-code/{scheme_code}",
-                params={"fields": "holdings"},
-                headers={**HEADERS, "Accept": "application/json"},
-                timeout=20,
-            )
-            if resp.status_code == 200:
-                break
-            if resp.status_code == 429:
-                last_error = "FinAPI HTTP 429 (rate limited)"
-                if attempt < 2:
-                    time.sleep(3)
-                    continue
-                return None, last_error, None
-            if resp.status_code == 404:
-                last_error = f"FinAPI HTTP 404 (scheme code {scheme_code} not found)"
-                if attempt < 2:
-                    time.sleep(2)
-                    continue
-                return None, last_error, None
-            return None, f"FinAPI returned HTTP {resp.status_code}", None
-        except requests.Timeout:
-            last_error = "FinAPI error: request timed out"
-            if attempt < 2:
-                time.sleep(2)
-                continue
-            return None, last_error, None
-        except Exception as e:
-            last_error = f"FinAPI error: {str(e)[:100]}"
-            if attempt < 2:
-                time.sleep(2)
-                continue
-            return None, last_error, None
-    else:
-        return None, last_error or "FinAPI: exhausted retries", None
+    url = f"{FINAPI_BASE}/scheme-code/{scheme_code}"
+    resp, err = _finapi_get(url, params={"fields": "holdings"})
+    if resp is None:
+        return None, err or "FinAPI: all request paths failed", None
 
     # Parse the successful response
     try:
@@ -312,13 +333,9 @@ def _fetch_holdings_finapi_by_name(scheme_name: str) -> Tuple[Optional[List[Dict
     try:
         results = []
         for sq in queries:
-            resp = requests.get(
-                f"{FINAPI_BASE}/search",
-                params={"schemeName": sq},
-                headers={**HEADERS, "Accept": "application/json"},
-                timeout=20,
-            )
-            if resp.status_code != 200:
+            url = f"{FINAPI_BASE}/search"
+            resp, err = _finapi_get(url, params={"schemeName": sq})
+            if resp is None:
                 continue
             data = resp.json()
             if data.get("status") != "success":
@@ -422,7 +439,7 @@ def fetch_holdings_mfdata(scheme_code: str) -> Tuple[Optional[List[Dict]], str, 
                     weight = 0.0
                 if weight <= 0:
                     continue
-                    holdings.append({
+                holdings.append({
                     "name": name.strip(),
                     "sector": sector,
                     "market_value": str(h.get("market_value", "")),
