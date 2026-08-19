@@ -50,22 +50,84 @@ HEADERS = {
 _all_schemes_cache = None
 
 
+def _mfapi_get(url: str, params: Optional[dict] = None) -> Tuple[Optional[requests.Response], str]:
+    """GET an api.mfapi.in URL with CORS-proxy fallback.
+
+    api.mfapi.in blocks requests from Streamlit Cloud's IP (same IP-blocking
+    issue as FinAPI), so a direct request alone is not enough. This tries the
+    direct request first, then falls back to public CORS proxies
+    (allorigins.win, then corsproxy.io).
+
+    Returns (resp, error_string). On success resp is a requests.Response with
+    status_code 200 and error_string is "". On failure resp is None.
+    """
+    from urllib.parse import quote
+
+    headers = {**HEADERS, "Accept": "application/json"}
+
+    # a) Direct request to api.mfapi.in
+    direct_err = ""
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=20)
+        if resp.status_code == 200:
+            return resp, ""
+        direct_err = f"mfapi.in direct HTTP {resp.status_code}"
+    except Exception as e:
+        direct_err = f"mfapi.in direct error: {str(e)[:100]}"
+
+    # Build the full URL (with query string already applied) for proxy fallback
+    full_url = url
+    if params:
+        full_url = requests.Request("GET", url, params=params).prepare().url
+    encoded_url = quote(full_url, safe="")
+
+    # b) allorigins.win proxy
+    allorigins_err = ""
+    try:
+        proxy_url = f"https://api.allorigins.win/raw?url={encoded_url}"
+        resp = requests.get(proxy_url, headers=headers, timeout=25)
+        if resp.status_code == 200:
+            return resp, ""
+        allorigins_err = f"allorigins HTTP {resp.status_code}"
+    except Exception as e:
+        allorigins_err = f"allorigins error: {str(e)[:100]}"
+
+    # c) corsproxy.io
+    corsproxy_err = ""
+    try:
+        proxy_url = f"https://corsproxy.io/?url={encoded_url}"
+        resp = requests.get(proxy_url, headers=headers, timeout=25)
+        if resp.status_code == 200:
+            return resp, ""
+        corsproxy_err = f"corsproxy HTTP {resp.status_code}"
+    except Exception as e:
+        corsproxy_err = f"corsproxy error: {str(e)[:100]}"
+
+    return None, f"{direct_err}; {allorigins_err}; {corsproxy_err}"
+
+
 # ---------------------------------------------------------------------------
 # Fund Search via mfapi.in
 # ---------------------------------------------------------------------------
 
 def _get_all_schemes() -> List[Dict]:
-    """Fetch the full AMFI scheme list from mfapi.in (cached)."""
+    """Fetch the full AMFI scheme list from mfapi.in (cached).
+
+    Uses _mfapi_get with CORS-proxy fallback because api.mfapi.in blocks
+    requests from Streamlit Cloud's IP.
+    """
     global _all_schemes_cache
     if _all_schemes_cache is not None:
         return _all_schemes_cache
+    resp, err = _mfapi_get(f"{MFAPI_BASE}")
+    if resp is None:
+        logger.warning(f"mfapi.in scheme list fetch failed: {err}")
+        return []
     try:
-        resp = requests.get(f"{MFAPI_BASE}", timeout=15, headers=HEADERS)
-        resp.raise_for_status()
         _all_schemes_cache = resp.json()
         return _all_schemes_cache
     except Exception as e:
-        logger.warning(f"mfapi.in scheme list fetch failed: {e}")
+        logger.warning(f"mfapi.in scheme list parse failed: {e}")
         return []
 
 
@@ -89,24 +151,36 @@ def search_funds(query: str, limit: int = 20) -> List[Dict]:
 
 
 def get_fund_nav(scheme_code: str) -> Tuple[Optional[str], Optional[str]]:
-    """Fetch latest NAV for a scheme. Returns (nav_value, nav_date)."""
+    """Fetch latest NAV for a scheme. Returns (nav_value, nav_date).
+
+    Uses _mfapi_get with CORS-proxy fallback because api.mfapi.in blocks
+    requests from Streamlit Cloud's IP.
+    """
+    resp, err = _mfapi_get(f"{MFAPI_BASE}/{scheme_code}")
+    if resp is None:
+        logger.warning(f"NAV fetch failed for {scheme_code}: {err}")
+        return None, None
     try:
-        resp = requests.get(f"{MFAPI_BASE}/{scheme_code}", timeout=15, headers=HEADERS)
-        resp.raise_for_status()
         data = resp.json()
         nav_data = data.get("data", [])
         if nav_data:
             return nav_data[0].get("nav"), nav_data[0].get("date")
     except Exception as e:
-        logger.warning(f"NAV fetch failed for {scheme_code}: {e}")
+        logger.warning(f"NAV parse failed for {scheme_code}: {e}")
     return None, None
 
 
 def get_fund_meta(scheme_code: str) -> Dict:
-    """Fetch fund metadata (fund house, category, etc.)."""
+    """Fetch fund metadata (fund house, category, etc.).
+
+    Uses _mfapi_get with CORS-proxy fallback because api.mfapi.in blocks
+    requests from Streamlit Cloud's IP.
+    """
+    resp, err = _mfapi_get(f"{MFAPI_BASE}/{scheme_code}")
+    if resp is None:
+        logger.warning(f"Meta fetch failed for {scheme_code}: {err}")
+        return {}
     try:
-        resp = requests.get(f"{MFAPI_BASE}/{scheme_code}", timeout=15, headers=HEADERS)
-        resp.raise_for_status()
         data = resp.json()
         meta = data.get("meta", {})
         return {
@@ -115,7 +189,7 @@ def get_fund_meta(scheme_code: str) -> Dict:
             "scheme_category": meta.get("scheme_category", "N/A"),
         }
     except Exception as e:
-        logger.warning(f"Meta fetch failed for {scheme_code}: {e}")
+        logger.warning(f"Meta parse failed for {scheme_code}: {e}")
         return {}
 
 
