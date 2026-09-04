@@ -6,7 +6,7 @@ import warnings; warnings.filterwarnings("ignore")
 
 _nse_companies=None; _exact_map=None; _token_map=None
 
-FOREIGN_STOCKS={"alphabet inc class a":"GOOGL","alphabet inc class c":"GOOG","alphabet inc":"GOOGL","alphabet":"GOOGL","amazon.com inc":"AMZN","amazon com inc":"AMZN","amazon.com":"AMZN","amazon":"AMZN","microsoft corp":"MSFT","microsoft corporation":"MSFT","microsoft":"MSFT","meta platforms inc class a":"META","meta platforms inc class c":"META","meta platforms inc":"META","meta platforms":"META","meta":"META","apple inc":"AAPL","apple":"AAPL","netflix inc":"NFLX","netflix":"NFLX","nvidia corp":"NVDA","nvidia corporation":"NVDA","nvidia":"NVDA","tesla inc":"TSLA","tesla":"TSLA","oracle corp":"ORCL","oracle corporation":"ORCL","oracle":"ORCL","adobe inc":"ADBE","adobe":"ADBE","salesforce inc":"CRM","salesforce":"CRM","intel corp":"INTC","intel corporation":"INTC","intel":"INTC","cisco systems":"CSCO","cisco":"CSCO","qualcomm inc":"QCOM","qualcomm":"QCOM","broadcom inc":"AVGO","broadcom":"AVGO","advanced micro devices":"AMD","amd":"AMD","paypal holdings":"PYPL","paypal":"PYPL","berkshire hathaway":"BRK-B","johnson and johnson":"JNJ","jpmorgan chase":"JPM","visa inc":"V","visa":"V","goldman sachs":"GS","bank of america":"BAC","wells fargo":"WFC","morgan stanley":"MS","hsbc holdings":"HSBC","hsbc":"HSBC","walt disney":"DIS","disney":"DIS","costco wholesale":"COST","costco":"COST","procter and gamble":"PG","coca cola":"KO","coca-cola":"KO","pepsi co":"PEP","pepsico":"PEP","mcdonald":"MCD","starbucks":"SBUX","nike":"NKE","walmart":"WMT","target":"TGT","home depot":"HD","pfizer":"PFE","abbott laboratories":"ABT","merck":"MRK","eli lilly":"LLY","astrazeneca plc":"AZN","novartis ag":"NVS","sanofi sa":"SNY","nestle sa":"NSRGY","unilever plc":"UL","unilever":"UL","spotify technology":"SPOT","spotify":"SPOT","shopify inc":"SHOP","shopify":"SHOP","uber technologies":"UBER","uber":"UBER","airbnb inc":"ABNB","airbnb":"ABNB","snowflake inc":"SNOW","snowflake":"SNOW","palantir technologies":"PLTR","palantir":"PLTR","crowdstrike holdings":"CRWD","crowdstrike":"CRWD","sap se":"SAP","sap":"SAP","samsung electronics":"005930.KS","samsung":"005930.KS","alibaba group":"BABA","alibaba":"BABA","tencent holdings":"0700.HK","tencent":"0700.HK","toyota motor":"TM","toyota":"TM"}
+FOREIGN_STOCKS={"alphabet inc class a":"GOOGL","alphabet inc class c":"GOOG","alphabet inc":"GOOGL","alphabet":"GOOGL","amazon.com inc":"AMZN","amazon com inc":"AMZN","amazon.com":"AMZN","amazon":"AMZN","microsoft corp":"MSFT","microsoft corporation":"MSFT","microsoft":"MSFT","meta platforms inc class a":"META","meta platforms inc class c":"META","meta platforms inc":"META","meta platforms":"META","meta":"META","apple inc":"AAPL","apple":"AAPL","netflix inc":"NFLX","netflix":"NFLX","nvidia corp":"NVDA","nvidia corporation":"NVDA","nvidia":"NVDA","tesla inc":"TSLA","tesla":"TSLA","oracle corp":"ORCL","oracle corporation":"ORCL","oracle":"ORCL","adobe inc":"ADBE","adobe":"ADBE","salesforce inc":"CRM","salesforce":"CRM","intel corp":"INTC","intel corporation":"INTC","intel":"INTC","cisco systems":"CSCO","cisco":"CSCO","qualcomm inc":"QCOM","qualcomm":"QCOM","broadcom inc":"AVGO","broadcom":"AVGO","advanced micro devices":"AMD","amd":"AMD","paypal holdings":"PYPL","paypal":"PYPL","berkshire hathaway":"BRK-B","johnson and johnson":"JNJ","jpmorgan chase":"JPM","visa inc":"V","visa":"V","goldman sachs":"GS","bank of america":"BAC","wells fargo":"WFC","morgan stanley":"MS","hsbc holdings":"HSBC","hsbc":"HSBC","walt disney":"DIS","disney":"DIS","costco wholesale":"COST","costco":"COST","procter and gamble":"PG","coca cola":"KO","coca-cola":"KO","pepsi co":"PEP","pepsico":"PEP","mcdonald":"MCD","starbucks":"SBUX","nike":"NKE","walmart":"WMT","target":"TGT","home depot":"HD","pfizer":"PFE","abbott laboratories":"ABT","merck":"MRK","eli lilly":"LLY","astrazeneca plc":"AZN","novartis ag":"NVS","sanofi sa":"SNY","nestle sa":"NSRGY","unilever plc":"UL","unilever":"UL","spotify technology":"SPOT","spotify":"SPOT","shopify inc":"SHOP","shopify":"SHOP","uber technologies":"UBER","uber":"UBER","airbnb inc":"ABNB","airbnb":"ABNB","snowflake inc":"SNOW","snowflake":"SNOW","palantir technologies":"PLTR","palantir":"PLTR","crowdstride holdings":"CRWD","crowdstrike":"CRWD","sap se":"SAP","sap":"SAP","samsung electronics":"005930.KS","samsung":"005930.KS","alibaba group":"BABA","alibaba":"BABA","tencent holdings":"0700.HK","tencent":"0700.HK","toyota motor":"TM","toyota":"TM"}
 
 REIT_MAP={"embassy office parks":"EMBASSY.NS","embassy office parks reit":"EMBASSY.NS","embassy reit":"EMBASSY.NS","brookfield india real estate":"BIRET.NS","brookfield india real estate trust":"BIRET.NS","brookfield india reit":"BIRET.NS","brookfield reit":"BIRET.NS","mindspace business parks":"MINDSPACE.NS","mindspace business parks reit":"MINDSPACE.NS","mindspace reit":"MINDSPACE.NS","nexsquare offices":"NEXSQUARE.NS","nexsquare reit":"NEXSQUARE.NS"}
 
@@ -132,18 +132,56 @@ def resolve_tickers(holdings):
     return resolved,unresolved
 
 def fetch_price_changes(tickers,batch_size=10):
+    """Fetch prev_close, curr_price, change_pct for a list of tickers.
+
+    Uses yf.download() for batch efficiency (one HTTP call per batch)
+    instead of per-ticker yf.Ticker().history() which triggers Yahoo's
+    rate limiter and returns empty data → None values.
+    Falls back to per-ticker calls for any tickers the batch misses.
+    """
     results={}; unique=list(set(tickers))
+    if not unique:
+        return results
+
+    # --- Batch download (fast, single HTTP request per batch) ---
     for i in range(0,len(unique),batch_size):
-        for ticker in unique[i:i+batch_size]:
-            try:
-                t=yf.Ticker(ticker); hist=t.history(period="5d")
-                if len(hist)>=2:
-                    cp=float(hist["Close"].iloc[-1]); pc=float(hist["Close"].iloc[-2])
-                    chg=((cp-pc)/pc*100) if pc>0 else 0.0
-                    results[ticker]={"curr_price":cp,"prev_close":pc,"change_pct":chg}
-                elif len(hist)==1:
-                    cp=float(hist["Close"].iloc[-1])
-                    results[ticker]={"curr_price":cp,"prev_close":cp,"change_pct":0.0}
-            except: pass
+        batch=unique[i:i+batch_size]
+        try:
+            data=yf.download(batch,period="5d",progress=False,threads=True)
+            if data is None or data.empty:
+                continue
+            close=data["Close"] if "Close" in data else data
+            for ticker in batch:
+                try:
+                    if ticker not in close.columns:
+                        continue
+                    col=close[ticker].dropna()
+                    if len(col)>=2:
+                        cp=float(col.iloc[-1]); pc=float(col.iloc[-2])
+                        chg=((cp-pc)/pc*100) if pc>0 else 0.0
+                        results[ticker]={"curr_price":cp,"prev_close":pc,"change_pct":chg}
+                    elif len(col)==1:
+                        cp=float(col.iloc[-1])
+                        results[ticker]={"curr_price":cp,"prev_close":cp,"change_pct":0.0}
+                except Exception:
+                    pass
+        except Exception:
+            pass
         if i+batch_size<len(unique): time.sleep(0.3)
+
+    # --- Per-ticker fallback for any tickers the batch missed ---
+    missing=[t for t in unique if t not in results]
+    for ticker in missing:
+        try:
+            t=yf.Ticker(ticker); hist=t.history(period="5d")
+            if len(hist)>=2:
+                cp=float(hist["Close"].iloc[-1]); pc=float(hist["Close"].iloc[-2])
+                chg=((cp-pc)/pc*100) if pc>0 else 0.0
+                results[ticker]={"curr_price":cp,"prev_close":pc,"change_pct":chg}
+            elif len(hist)==1:
+                cp=float(hist["Close"].iloc[-1])
+                results[ticker]={"curr_price":cp,"prev_close":cp,"change_pct":0.0}
+        except Exception:
+            pass
+
     return results
