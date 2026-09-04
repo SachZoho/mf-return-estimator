@@ -51,7 +51,7 @@ _all_schemes_cache = None
 
 
 def _mfapi_get(url: str, params: Optional[dict] = None) -> Tuple[Optional[requests.Response], str]:
-    """GET an api.mfapi.in URL with CORS-proxy fallback.
+    ""'GET an api.mfapi.in URL with CORS-proxy fallback.
 
     api.mfapi.in blocks requests from Streamlit Cloud's IP (same IP-blocking
     issue as FinAPI), so a direct request alone is not enough. This tries the
@@ -345,16 +345,24 @@ def _parse_finapi_holdings(raw_holdings: list) -> List[Dict]:
 
 
 def _classify_instrument(name: str, sector: str) -> str:
-    """Classify a holding as equity, foreign equity, or non-equity."""
+    """Classify a holding as equity, foreign equity, or non-equity.
+
+    Returns one of: "equity", "foreign equity", "non_equity".
+    Note: values use SPACES ("foreign equity") NOT underscores, to match
+    the filter checks in app.py / mf_helpers.py / alerts.py.
+    """
     name_lower = name.lower()
     sector_lower = sector.lower() if sector else ""
 
-    # Non-equity indicators
+    # Non-equity indicators (debt, cash, repo, futures, etc.)
     non_equity_keywords = [
         "treps", "treps_", "trp_", "tbill", "cash offset", "net receiv",
         "liquid", "parag parikh liquid", "reverse repo", "repo",
         "national bank", "export-import", "sidbi", "nabard",
         "future on", "august 2026 future", "september 2026 future",
+        "october 2026 future", "november 2026 future", "december 2026 future",
+        "commercial paper", "certificate of deposit", "cblo",
+        "net current assets", "margin money", "security deposits",
     ]
     for kw in non_equity_keywords:
         if kw in name_lower:
@@ -369,7 +377,7 @@ def _classify_instrument(name: str, sector: str) -> str:
     ]
     for kw in foreign_keywords:
         if kw in name_lower:
-            return "foreign_equity"
+            return "foreign equity"
 
     # REITs
     reit_keywords = ["reit", "embassy office", "brookfield india real estate"]
