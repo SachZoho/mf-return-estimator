@@ -40,7 +40,7 @@ components.html("""
                   || window.parent.document.querySelector('.stApp');
             if (!el) return 'light';
             var bg = window.getComputedStyle(el).backgroundColor;
-             var m = bg.match(/\d+/g);
+            var m = bg.match(/\d+/g);
             if (m && parseInt(m[0]) < 50) return 'dark';
             return 'light';
         } catch(e) { return 'light'; }
@@ -71,7 +71,7 @@ components.html("""
         window.parent.gtag('js', new Date());
         window.parent.gtag('config', 'G-WGVCPVK4H6', {
             page_title: 'MF Return Estimator',
-            page_location: window.parent.location.href
+             page_location: window.parent.location.href
         });
     }
 </script>
@@ -239,7 +239,7 @@ with tab_search:
     if st.session_state.search_results and not st.session_state.selected_fund:
         st.markdown(f"### Found {len(st.session_state.search_results)} matching funds")
         st.caption("Click a fund below to analyze it")
-        fund_options = [([r["scheme_name"], [r["scheme_code"]]]) for r in st.session_state.search_results]
+        fund_options = [([r["scheme_name"], str(r["scheme_code"])]) for r in st.session_state.search_results]
         for idx, (label, code) in enumerate(fund_options):
             col_name, col_btn2 = st.columns([5, 1])
             with col_name:
@@ -290,7 +290,7 @@ with tab_search:
         if st.session_state.holdings_data:
             holdings = st.session_state.holdings_data
             holdings_date = st.session_state.get("holdings_date")
-            equity_holdings = [h for h in holdings if h.get("instrument", "").lower() in ("equity", "stock", "foreign equity")]
+            equity_holdings = [h for h in holdings if h.get("instrument", "").lower() in ("equity", "stock", "foreign equity", "foreign_equity")]
 
             st.markdown("---")
             st.markdown("### Estimate Today's Return")
@@ -379,7 +379,13 @@ with tab_search:
                     nav_float = float(nav_val) if nav_val else None
                 except (ValueError, TypeError):
                     pass
-                render_fund_detail(fund_name, fund_code, holdings, st.session_state.holdings_source, holdings_date, nav_float, None, None)
+                # Store computed results so render_fund_detail can show them
+                if results:
+                    st.session_state.computed_results = results
+                    total_est = sum(r["contribution"] for r in results)
+                    render_fund_detail(fund_name, fund_code, holdings, st.session_state.holdings_source, holdings_date, nav_float, total_est, results)
+                else:
+                    render_fund_detail(fund_name, fund_code, holdings, st.session_state.holdings_source, holdings_date, nav_float, None, None)
 
     if not st.session_state.search_results and not st.session_state.selected_fund:
         st.markdown(
@@ -536,7 +542,9 @@ with tab_sheet:
                     if not scheme_code:
                         sr = search_funds(mf["name"], limit=5)
                         if sr:
-                            best = max(sr, key=lambda x: x.get("score", 0))
+                            # Pick the best match by name similarity
+                            from difflib import SequenceMatcher
+                            best = max(sr, key=lambda x: SequenceMatcher(None, mf["name"].lower(), x.get("scheme_name", "").lower()).ratio())
                             scheme_code = str(best["scheme_code"])
                             result["code"] = scheme_code
 
