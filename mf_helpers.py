@@ -18,12 +18,11 @@ def _chart_template():
         return "plotly_dark"
     return "plotly_white"
 
-
 def compute_fund_return(holdings):
     """Given holdings list, resolve tickers, fetch prices, return (day_change, details)."""
     equity = [
         h for h in holdings
-        if h.get("instrument", "").lower() in ("equity", "stock", "foreign equity")
+        if h.get("instrument", "").lower() in ("equity", "stock", "foreign equity", "foreign_equity")
     ]
     ticker_map = {}
     for h in equity:
@@ -31,7 +30,7 @@ def compute_fund_return(holdings):
         if ticker:
             ticker_map[h["name"]] = ticker
     if not ticker_map:
-        return None, []
+        return 0.0, []
     all_tickers = list(set(ticker_map.values()))
     price_data = fetch_price_changes(all_tickers)
     total_return = 0.0
@@ -52,7 +51,6 @@ def compute_fund_return(holdings):
             })
     return total_return, details
 
-
 def render_fund_detail(fund_name, fund_code, holdings, source, holdings_date, nav_val, day_change, return_details):
     """Render the holdings detail view for a single fund."""
     st.markdown(f"### {fund_name}")
@@ -68,7 +66,7 @@ def render_fund_detail(fund_name, fund_code, holdings, source, holdings_date, na
     with col3:
         st.metric("Total Holdings", len(holdings) if holdings else 0)
     with col4:
-        eq = [h for h in (holdings or []) if h.get("instrument", "").lower() in ("equity", "stock", "foreign equity")]
+        eq = [h for h in (holdings or []) if h.get("instrument", "").lower() in ("equity", "stock", "foreign equity", "foreign_equity")]
         ew = sum(h["weight"] for h in eq)
         st.metric("Equity Exposure", f"{ew:.1f}%")
     with col5:
@@ -78,8 +76,8 @@ def render_fund_detail(fund_name, fund_code, holdings, source, holdings_date, na
         st.warning("No holdings data available for this fund.")
         return
 
-    equity = [h for h in holdings if h.get("instrument", "").lower() in ("equity", "stock", "foreign equity")]
-    non_equity = [h for h in holdings if h.get("instrument", "").lower() not in ("equity", "stock", "foreign equity")]
+    equity = [h for h in holdings if h.get("instrument", "").lower() in ("equity", "stock", "foreign equity", "foreign_equity")]
+    non_equity = [h for h in holdings if h.get("instrument", "").lower() not in ("equity", "stock", "foreign equity", "foreign_equity")]
 
     # Top 10 bar chart
     st.markdown("#### Top 10 Holdings by Weight")
