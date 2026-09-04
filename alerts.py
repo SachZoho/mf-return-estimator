@@ -73,7 +73,7 @@ GITHUB_API = "https://api.github.com"
 
 
 def read_alerts_github(token: str, owner: str, repo: str, path: str = ALERTS_CSV_PATH,
-                        branch: str = "main") -> Tuple[List[Dict]], Optional[str]]:
+                        branch: str = "main") -> Tuple[List[Dict], Optional[str]]:
     """
     Read alerts.csv from GitHub repo.
     Returns (alerts_list, file_sha). file_sha is needed for updates.
@@ -90,7 +90,7 @@ def read_alerts_github(token: str, owner: str, repo: str, path: str = ALERTS_CSV
         data = resp.json()
         sha = data.get("sha")
         import base64
-        content = base64.b64decode(data.get("content", "")){decode("utf-8")
+        content = base64.b64decode(data.get("content", "")).decode("utf-8")
         reader = csv.DictReader(io.StringIO(content))
         alerts = list(reader)
         return alerts, sha
@@ -205,7 +205,7 @@ def compute_fund_return(scheme_code: str, scheme_name: str) -> Tuple[Optional[fl
 
     # Filter to equity holdings
     equity_holdings = [h for h in holdings
-                        if h.get("instrument", "").lower() in ("equity", "stock", "foreign equity")]
+                        if h.get("instrument", "").lower() in ("equity", "stock", "foreign equity", "foreign_equity")]
     if not equity_holdings:
         return None, "No equity holdings found"
 
@@ -281,7 +281,7 @@ Tour tracked mutual fund has an estimated negative return today.
 
 Fund: {fund_name}
 Estimated Return: {estimated_return:+.4f}%
-Checked at: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}}
+Checked at: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
 
 --- Detailed Breakdown ---
 {details}
