@@ -118,8 +118,12 @@ def fetch_index_data():
                     curr = h_curr
                 if h_prev is not None:
                     prev = h_prev
-                change = curr - prev
-                change_pct = (change / prev) * 100 if prev not in (None, 0) else 0.0
+                if prev is not None and prev != 0:
+                    change = curr - prev
+                    change_pct = (change / prev) * 100
+                elif prev is not None and prev == 0:
+                    change = 0.0
+                    change_pct = 0.0
 
         # 3) Last resort: .info for regularMarketChange / regularMarketChangePercent
         if (change is None or change == 0) and curr is None:
@@ -132,7 +136,7 @@ def fetch_index_data():
                 change_pct = i_pct
             # Derive prev close from value/change if we only got change
             if curr is not None and change is not None and prev is None:
-                prev = curr - change if change is not None else curr
+                prev = curr - change
 
         # 4) Skip indexes with no usable data at all
         if curr is None:
@@ -140,7 +144,7 @@ def fetch_index_data():
         if change is None:
             change = 0.0
         if change_pct is None:
-            change_pct = (change / prev) * 100 if prev not in (None, 0) else 0.0
+            change_pct = (change / prev) * 100 if prev is not None and prev != 0 else 0.0
 
         results.append({
             "name": name,
